@@ -1,8 +1,8 @@
 import { loadSettings, saveSettings, isConfigured } from '../shared/settings'
 import type { ToBackground } from '../shared/messages'
 import {
-  filterUncached,
-  putCached,
+  filterUncachedByText,
+  expandTranslationsToAllIds,
   translateAllBlocks,
 } from './translate'
 
@@ -54,21 +54,48 @@ async function handle(message: ToBackground) {
         failedIds: message.blocks.map((b) => b.id),
       }
     }
-    const { cached, missing } = filterUncached(message.pageKey, message.blocks)
+
+    const { cached, missing, textHashToIds, idToText } = filterUncachedByText(
+      message.pageKey,
+      settings.sourceLang,
+      settings.targetLang,
+      message.blocks,
+    )
+
     if (missing.length === 0) {
       return { type: 'translate-batch-result', ok: true, translations: cached }
     }
+
     const result = await translateAllBlocks(missing, settings)
-    if (result.translations.length) putCached(message.pageKey, result.translations)
-    const translations = [...cached, ...result.translations]
+    const expanded = expandTranslationsToAllIds(
+      message.pageKey,
+      settings.sourceLang,
+      settings.targetLang,
+      result.translations,
+      idToText,
+      textHashToIds,
+    )
+    const translations = [...cached, ...expanded]
+
     if (result.ok) {
       return { type: 'translate-batch-result', ok: true, translations }
+    }
+
+    // Map failed representative ids → all ids that share their text
+    const failedSet = new Set<string>()
+    for (const fid of result.failedIds) {
+      const key = [...textHashToIds.entries()].find(([, ids]) => ids.includes(fid))?.[0]
+      if (key) {
+        for (const id of textHashToIds.get(key) ?? [fid]) failedSet.add(id)
+      } else {
+        failedSet.add(fid)
+      }
     }
     return {
       type: 'translate-batch-result',
       ok: false,
       error: result.error,
-      failedIds: result.failedIds,
+      failedIds: [...failedSet],
       translations,
     }
   }

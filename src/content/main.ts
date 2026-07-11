@@ -7,6 +7,7 @@ import type {
   TranslateBatchResultOk,
   TranslateBlock,
 } from '../shared/messages'
+import { normalizeText } from '../shared/text'
 import { extractVisibleBlocks } from './extract'
 import { BlockRegistry } from './registry'
 import { LensOverlay } from './lens'
@@ -26,6 +27,8 @@ let listenersBound = false
 
 /** In-flight block ids — avoid duplicate API calls for the same block. */
 const inflight = new Set<string>()
+/** In-flight normalized texts — identical sentences share one request. */
+const inflightTexts = new Set<string>()
 
 const TAP_STICKY_MS = 320
 
@@ -60,23 +63,36 @@ function pageKey(): string {
 }
 
 /**
- * Send only the given blocks to the background.
- * Skips ready / inflight; session cache in SW also skips already-translated ids.
+ * Send blocks to background. Dedupes identical sentences client-side;
+ * SW also caches by text hash so repeats never hit the API again.
  */
 async function translateSpecific(blocks: TranslateBlock[]): Promise<void> {
   if (disabledHere() || !configured) return
 
-  const todo = blocks.filter((b) => {
+  const todo: TranslateBlock[] = []
+  const seenText = new Set<string>()
+
+  for (const b of blocks) {
     const e = registry.get(b.id)
-    if (!e) return false
-    if (e.status === 'ready' && e.translation) return false
-    if (inflight.has(b.id)) return false
-    return true
-  })
+    if (!e) continue
+    if (e.status === 'ready' && e.translation) continue
+    if (inflight.has(b.id)) continue
+    const norm = normalizeText(b.text)
+    if (inflightTexts.has(norm)) continue
+    // One request per unique sentence in this batch
+    if (seenText.has(norm)) {
+      // Still mark pending so UI shows loading; result expands via setTranslation
+      registry.setPending(b.id)
+      continue
+    }
+    seenText.add(norm)
+    todo.push({ id: b.id, tag: b.tag, text: norm })
+  }
   if (!todo.length) return
 
   for (const b of todo) {
     inflight.add(b.id)
+    inflightTexts.add(normalizeText(b.text))
     registry.setPending(b.id)
   }
 
@@ -92,6 +108,7 @@ async function translateSpecific(blocks: TranslateBlock[]): Promise<void> {
         ? (res as TranslateBatchResultOk).translations
         : ((res as TranslateBatchResultErr).translations ?? [])
 
+    // setTranslation fans out to all same-text blocks in the registry
     for (const t of list) registry.setTranslation(t.id, t.translation)
 
     if (!res || res.ok === false) {
@@ -108,7 +125,10 @@ async function translateSpecific(blocks: TranslateBlock[]): Promise<void> {
       if (!registry.get(b.id)?.translation) registry.setError(b.id, msg)
     }
   } finally {
-    for (const b of todo) inflight.delete(b.id)
+    for (const b of todo) {
+      inflight.delete(b.id)
+      inflightTexts.delete(normalizeText(b.text))
+    }
   }
 
   if (lensActive) updateLens()

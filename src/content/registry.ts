@@ -1,3 +1,5 @@
+import { normalizeText } from '../shared/text'
+
 export type BlockStatus = 'pending' | 'ready' | 'error' | 'empty'
 
 export type RegistryEntry = {
@@ -13,6 +15,8 @@ export type RegistryEntry = {
 export class BlockRegistry {
   private byId = new Map<string, RegistryEntry>()
   private byEl = new WeakMap<Element, string>()
+  /** normalized text → translation (page-local, identical sentences share one). */
+  private byNormText = new Map<string, string>()
 
   upsert(
     entry: Omit<RegistryEntry, 'status' | 'translation' | 'error'> & {
@@ -20,6 +24,8 @@ export class BlockRegistry {
     },
   ): RegistryEntry {
     const existing = this.byId.get(entry.id)
+    const norm = normalizeText(entry.text)
+    const textHit = this.byNormText.get(norm)
     const next: RegistryEntry = {
       id: entry.id,
       el: entry.el,
@@ -33,6 +39,11 @@ export class BlockRegistry {
     if (existing && existing.text === next.text && existing.translation) {
       next.translation = existing.translation
       next.status = 'ready'
+    } else if (textHit) {
+      // Identical sentence already translated elsewhere on the page
+      next.translation = textHit
+      next.status = 'ready'
+      next.error = undefined
     }
     this.byId.set(next.id, next)
     this.byEl.set(next.el, next.id)
@@ -42,9 +53,16 @@ export class BlockRegistry {
   setTranslation(id: string, translation: string): void {
     const e = this.byId.get(id)
     if (!e) return
-    e.translation = translation
-    e.status = 'ready'
-    e.error = undefined
+    const norm = normalizeText(e.text)
+    this.byNormText.set(norm, translation)
+    // Apply to every block with the same normalized text
+    for (const other of this.byId.values()) {
+      if (normalizeText(other.text) === norm) {
+        other.translation = translation
+        other.status = 'ready'
+        other.error = undefined
+      }
+    }
   }
 
   setError(id: string, error: string): void {
