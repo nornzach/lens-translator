@@ -43,7 +43,8 @@ async function setHostnamePaused(hostname: string, paused: boolean): Promise<Use
   if (!res || res.type !== 'settings') {
     throw new Error('Failed to update pause state')
   }
-  return res.settings
+  // Message settings redact apiKey; reload from storage for accurate status.
+  return loadSettings()
 }
 
 async function init(): Promise<void> {

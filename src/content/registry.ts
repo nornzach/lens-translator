@@ -81,6 +81,15 @@ export class BlockRegistry {
       .map((e) => ({ id: e.id, tag: e.tag, text: e.text }))
   }
 
+  resetErrorsToPending(): void {
+    for (const e of this.byId.values()) {
+      if (e.status === 'error') {
+        e.status = 'pending'
+        e.error = undefined
+      }
+    }
+  }
+
   all(): RegistryEntry[] {
     return [...this.byId.values()]
   }

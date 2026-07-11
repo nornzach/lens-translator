@@ -43,7 +43,7 @@ Popup:
 
 ## Privacy
 
-- API key is stored in `chrome.storage.local` and is only read by the **background service worker**.
+- API key is stored in `chrome.storage.local`. The **background service worker** reads it for API calls; **content scripts never receive the raw key** via `get-settings` messages (it is redacted; a `configured` flag is sent instead). The options page reads storage locally for the settings form.
 - Translation traffic goes only to the **user-configured** `baseURL` endpoint.
 - Page text is sent to that endpoint solely for batch translation; nothing else is uploaded to third-party analytics by this extension.
 

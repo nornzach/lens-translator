@@ -11,6 +11,8 @@ import { isHostnamePaused } from './pause'
 const registry = new BlockRegistry()
 const lens = new LensOverlay()
 let settings: UserSettings = DEFAULT_SETTINGS
+/** From background; apiKey is never sent to the content script. */
+let configured = false
 let lensActive = false
 let lastMouse = { x: 0, y: 0 }
 let translating = false
@@ -19,7 +21,12 @@ async function refreshSettings(): Promise<void> {
   const res = await chrome.runtime.sendMessage({ type: 'get-settings' })
   if (res?.type === 'settings') {
     settings = res.settings
+    configured = Boolean(res.configured)
     lens.setWidth(settings.lensWidthPx)
+    if (configured) {
+      registry.resetErrorsToPending()
+      void scanAndTranslate({ force: true })
+    }
   }
 }
 
@@ -27,8 +34,9 @@ function disabledHere(): boolean {
   return isHostnamePaused(location.hostname, settings.pausedHostnames)
 }
 
-async function scanAndTranslate(): Promise<void> {
-  if (disabledHere() || !settings.autoTranslate) return
+async function scanAndTranslate(opts?: { force?: boolean }): Promise<void> {
+  if (disabledHere()) return
+  if (!settings.autoTranslate && !opts?.force) return
   const margin = Math.round(window.innerHeight * settings.prefetchMarginRatio)
   const blocks = extractVisibleBlocks(settings.minTextLength, margin)
   for (const b of blocks) {
@@ -52,13 +60,23 @@ async function scanAndTranslate(): Promise<void> {
           }).translations ?? [])
 
     for (const t of list) registry.setTranslation(t.id, t.translation)
-    if (res && res.ok === false) {
-      for (const id of res.failedIds ?? pending.map((p) => p.id)) {
-        if (!registry.get(id)?.translation) registry.setError(id, res.error)
+    if (!res || res.ok === false) {
+      const errMsg = !res ? 'No response from background' : res.error
+      for (const id of (!res ? pending.map((p) => p.id) : (res.failedIds ?? pending.map((p) => p.id)))) {
+        if (!registry.get(id)?.translation) registry.setError(id, errMsg)
       }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    for (const p of pending) {
+      if (!registry.get(p.id)?.translation) registry.setError(p.id, msg)
     }
   } finally {
     translating = false
+    // Retry if work arrived while locked (new blocks upserted mid-flight).
+    if (registry.pendingBlocks().length > 0) {
+      void scanAndTranslate(opts)
+    }
   }
   if (lensActive) updateLens()
 }
@@ -76,7 +94,7 @@ function updateLens(): void {
   const hit = stack[0] ?? null
   const entry = registry.getByElement(hit)
 
-  if (!settings.apiKey?.trim() || !settings.model?.trim() || !settings.baseURL?.trim()) {
+  if (!configured) {
     lens.showAt(lastMouse.x, lastMouse.y, { kind: 'unconfigured' })
     lens.highlight(null)
     return
@@ -99,7 +117,7 @@ function updateLens(): void {
     })
   } else {
     lens.showAt(lastMouse.x, lastMouse.y, { kind: 'pending' })
-    void scanAndTranslate()
+    void scanAndTranslate({ force: true })
   }
 }
 

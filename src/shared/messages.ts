@@ -26,7 +26,13 @@ export type TranslateBatchResultErr = {
 }
 
 export type GetSettingsMsg = { type: 'get-settings' }
-export type SettingsMsg = { type: 'settings'; settings: import('./settings-defaults').UserSettings }
+export type SettingsMsg = {
+  type: 'settings'
+  /** API key is redacted in message responses to content scripts. */
+  settings: import('./settings-defaults').UserSettings
+  /** True when baseURL + apiKey + model are all set (computed before key redaction). */
+  configured: boolean
+}
 
 export type PauseHostnameMsg = {
   type: 'set-hostname-paused'

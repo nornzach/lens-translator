@@ -11,10 +11,18 @@ chrome.runtime.onMessage.addListener((message: ToBackground, _sender, sendRespon
   return true // async
 })
 
+function settingsForContent(settings: Awaited<ReturnType<typeof loadSettings>>) {
+  return {
+    type: 'settings' as const,
+    settings: { ...settings, apiKey: '' },
+    configured: isConfigured(settings),
+  }
+}
+
 async function handle(message: ToBackground) {
   if (message.type === 'get-settings') {
     const settings = await loadSettings()
-    return { type: 'settings', settings }
+    return settingsForContent(settings)
   }
 
   if (message.type === 'set-hostname-paused') {
@@ -24,7 +32,7 @@ async function handle(message: ToBackground) {
     else set.delete(message.hostname)
     const next = { ...settings, pausedHostnames: [...set] }
     await saveSettings(next)
-    return { type: 'settings', settings: next }
+    return settingsForContent(next)
   }
 
   if (message.type === 'translate-batch') {
