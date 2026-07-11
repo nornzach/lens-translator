@@ -7,57 +7,89 @@
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
+    <svg class="svg-filters" aria-hidden="true" width="0" height="0">
+      <defs>
+        <filter
+          id="glass-distortion"
+          x="-20%"
+          y="-20%"
+          width="140%"
+          height="140%"
+          color-interpolation-filters="sRGB"
+        >
+          <feTurbulence
+            type="fractalNoise"
+            baseFrequency="0.008 0.008"
+            numOctaves="2"
+            seed="3"
+            result="noise"
+          />
+          <feGaussianBlur in="noise" stdDeviation="0.5" result="softNoise" />
+          <feDisplacementMap
+            in="SourceGraphic"
+            in2="softNoise"
+            scale="10"
+            xChannelSelector="R"
+            yChannelSelector="G"
+          />
+        </filter>
+      </defs>
+    </svg>
+
     <div class="shell">
-      <div class="glow glow-a" aria-hidden="true"></div>
-      <div class="glow glow-b" aria-hidden="true"></div>
+      <div class="liquidGlass-wrapper popup-shell">
+        <div class="liquidGlass-effect"></div>
+        <div class="liquidGlass-tint"></div>
+        <div class="liquidGlass-shine"></div>
 
-      <main class="popup glass">
-        <header class="header">
-          <div class="brand">
-            <span class="logo" aria-hidden="true"></span>
-            <div>
-              <h1>Lens</h1>
-              <p class="subtitle" id="hotkeyHint">按住快捷键偷看中文</p>
+        <div class="liquidGlass-text popup-inner">
+          <header class="header">
+            <div class="brand">
+              <span class="logo" aria-hidden="true"></span>
+              <div>
+                <h1>Lens</h1>
+                <p class="subtitle" id="hotkeyHint">按住快捷键偷看中文</p>
+              </div>
             </div>
-          </div>
-        </header>
+          </header>
 
-        <section class="card glass-inner">
-          <div class="row">
-            <span class="label">当前站点</span>
-            <span id="hostname" class="value mono">—</span>
-          </div>
-          <label class="switch-row">
-            <span class="switch-text">暂停此站</span>
-            <input id="pauseToggle" type="checkbox" class="switch" disabled />
-          </label>
-        </section>
-
-        <section class="card glass-inner">
-          <div class="row">
-            <span class="label">API</span>
-            <span id="apiStatus" class="pill">…</span>
-          </div>
-          <label class="switch-row">
-            <div class="switch-text-block">
-              <span class="switch-text">自动预译可见区</span>
-              <span class="switch-desc" id="modeDesc">关：仅透镜下的块才翻译</span>
+          <section class="menu-item card">
+            <div class="row">
+              <span class="label">当前站点</span>
+              <span id="hostname" class="value mono">—</span>
             </div>
-            <input id="autoToggle" type="checkbox" class="switch" />
-          </label>
-        </section>
+            <label class="switch-row menu-item nested">
+              <span class="switch-text">暂停此站</span>
+              <input id="pauseToggle" type="checkbox" class="switch" disabled />
+            </label>
+          </section>
 
-        <p class="hint" id="usageHint">
-          默认按需翻译并缓存；移到已译过的块不会重复请求。
-        </p>
+          <section class="menu-item card">
+            <div class="row">
+              <span class="label">API</span>
+              <span id="apiStatus" class="pill">…</span>
+            </div>
+            <label class="switch-row menu-item nested">
+              <div class="switch-text-block">
+                <span class="switch-text">自动预译可见区</span>
+                <span class="switch-desc" id="modeDesc">关：仅透镜下的块才翻译</span>
+              </div>
+              <input id="autoToggle" type="checkbox" class="switch" />
+            </label>
+          </section>
 
-        <button type="button" id="openOptions" class="btn primary">
-          <span>打开设置</span>
-        </button>
+          <p class="hint" id="usageHint">
+            默认按需翻译并缓存；相同句子只译一次。
+          </p>
 
-        <p id="unconfiguredTip" class="tip" hidden></p>
-        <p id="error" class="error" hidden></p>
-      </main>
+          <button type="button" id="openOptions" class="btn primary menu-item">
+            <span>打开设置</span>
+          </button>
+
+          <p id="unconfiguredTip" class="tip" hidden></p>
+          <p id="error" class="error" hidden></p>
+        </div>
+      </div>
     </div>
     <script type="module" src="./main.ts"></script>
   </body>
