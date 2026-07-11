@@ -48,6 +48,38 @@ describe('chatCompletionsJson', () => {
     expect(body.response_format.type).toBe('json_schema')
   })
 
+  it('sends DeepSeek thinking disabled when provider=deepseek and reasoning off', async () => {
+    await chatCompletionsJson({
+      baseURL: 'https://api.deepseek.com',
+      apiKey: 'sk-x',
+      model: 'deepseek-chat',
+      systemPrompt: 'sys',
+      userPrompt: 'user',
+      useJsonSchema: false,
+      provider: 'deepseek',
+      reasoningPref: 'off',
+    })
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.thinking).toEqual({ type: 'disabled' })
+  })
+
+  it('sends StepFun reasoning_effort=low when off', async () => {
+    await chatCompletionsJson({
+      baseURL: 'https://api.stepfun.com/v1',
+      apiKey: 'sk-x',
+      model: 'step-3.5-flash',
+      systemPrompt: 'sys',
+      userPrompt: 'user',
+      useJsonSchema: false,
+      provider: 'stepfun',
+      reasoningPref: 'off',
+    })
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.reasoning_effort).toBe('low')
+  })
+
   it('returns error on non-OK', async () => {
     vi.stubGlobal(
       'fetch',

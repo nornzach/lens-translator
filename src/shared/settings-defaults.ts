@@ -1,3 +1,5 @@
+import type { ProviderId, ReasoningPref } from './providers'
+
 export type HotkeyConfig = {
   altKey: boolean
   shiftKey: boolean
@@ -10,6 +12,13 @@ export type UserSettings = {
   baseURL: string
   apiKey: string
   model: string
+  /** auto | openai | deepseek | stepfun */
+  provider: ProviderId
+  /**
+   * Thinking / reasoning for providers that support it.
+   * Default off (or lowest where off is unavailable, e.g. StepFun → low).
+   */
+  reasoningPref: ReasoningPref
   sourceLang: string
   targetLang: string
   autoTranslate: boolean
@@ -25,6 +34,8 @@ export const DEFAULT_SETTINGS: UserSettings = {
   baseURL: 'https://api.openai.com/v1',
   apiKey: '',
   model: 'gpt-4o-mini',
+  provider: 'auto',
+  reasoningPref: 'off',
   sourceLang: 'en',
   targetLang: 'zh',
   /** Default off: only translate the block under the lens (fast first paint). */
@@ -43,6 +54,16 @@ export const DEFAULT_SETTINGS: UserSettings = {
   pausedHostnames: [],
 }
 
+function asProviderId(v: unknown): ProviderId {
+  if (v === 'openai' || v === 'deepseek' || v === 'stepfun' || v === 'auto') return v
+  return DEFAULT_SETTINGS.provider
+}
+
+function asReasoningPref(v: unknown): ReasoningPref {
+  if (v === 'off' || v === 'low' || v === 'medium' || v === 'high') return v
+  return DEFAULT_SETTINGS.reasoningPref
+}
+
 export function mergeSettings(partial: Partial<UserSettings> | null | undefined): UserSettings {
   const p = partial ?? {}
   return {
@@ -52,6 +73,8 @@ export function mergeSettings(partial: Partial<UserSettings> | null | undefined)
     baseURL: String(p.baseURL ?? DEFAULT_SETTINGS.baseURL ?? ''),
     apiKey: String(p.apiKey ?? DEFAULT_SETTINGS.apiKey ?? ''),
     model: String(p.model ?? DEFAULT_SETTINGS.model ?? ''),
+    provider: asProviderId(p.provider),
+    reasoningPref: asReasoningPref(p.reasoningPref),
     sourceLang: String(p.sourceLang ?? DEFAULT_SETTINGS.sourceLang),
     targetLang: String(p.targetLang ?? DEFAULT_SETTINGS.targetLang),
     hotkey: { ...DEFAULT_SETTINGS.hotkey, ...(p.hotkey ?? {}) },

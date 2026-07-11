@@ -20,6 +20,18 @@
           <h2>API（OpenAI 兼容）</h2>
           <p id="configBadge" class="config-badge warn">状态：检测中…</p>
           <label>
+            服务商
+            <select id="provider" name="provider">
+              <option value="auto">自动识别（按 Base URL / 模型）</option>
+              <option value="openai">OpenAI / 通用兼容</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="stepfun">StepFun 阶跃星辰</option>
+            </select>
+          </label>
+          <p class="hint" id="providerHint">
+            翻译任务默认关闭/压低思考（DeepSeek 关 thinking；StepFun 用 reasoning_effort=low）。
+          </p>
+          <label>
             Base URL
             <input
               id="baseURL"
@@ -46,6 +58,18 @@
             模型
             <input id="model" name="model" type="text" placeholder="gpt-4o-mini" spellcheck="false" />
           </label>
+          <label>
+            推理 / Thinking（翻译建议关）
+            <select id="reasoningPref" name="reasoningPref">
+              <option value="off">关闭 / 最低（推荐·快）</option>
+              <option value="low">低</option>
+              <option value="medium">中</option>
+              <option value="high">高（慢）</option>
+            </select>
+          </label>
+          <p class="hint">
+            DeepSeek：off → thinking.disabled；StepFun 不能关思考时 off 会落到 low。
+          </p>
         </section>
 
         <section class="card">

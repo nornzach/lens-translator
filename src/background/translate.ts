@@ -58,6 +58,8 @@ export async function translateAllBlocks(
         systemPrompt: SYSTEM,
         userPrompt,
         useJsonSchema,
+        provider: settings.provider,
+        reasoningPref: settings.reasoningPref,
       })
 
       if (!result.ok && result.status === 400 && useJsonSchema && attempt === 1) {
@@ -68,6 +70,8 @@ export async function translateAllBlocks(
           systemPrompt: SYSTEM,
           userPrompt,
           useJsonSchema: false,
+          provider: settings.provider,
+          reasoningPref: settings.reasoningPref,
         })
       }
 

@@ -8,6 +8,11 @@ import {
   type UserSettings,
 } from '../shared/settings'
 import { formatHotkeyLabel, hotkeyFromKeyboardEvent } from '../shared/hotkey'
+import {
+  PROVIDER_PRESETS,
+  type ProviderId,
+  type ReasoningPref,
+} from '../shared/providers'
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id)
@@ -45,13 +50,14 @@ function writeHotkeyHidden(h: HotkeyConfig): void {
 }
 
 function fillForm(s: UserSettings): void {
+  el<HTMLSelectElement>('provider').value = s.provider
   el<HTMLInputElement>('baseURL').value = s.baseURL
-  // Never put real key into a placeholder-only state; show key if present
   el<HTMLInputElement>('apiKey').value = s.apiKey
   el<HTMLInputElement>('apiKey').placeholder = s.apiKey
     ? '已保存（留空再保存可保留原 Key）'
     : 'sk-... 或供应商密钥'
   el<HTMLInputElement>('model').value = s.model
+  el<HTMLSelectElement>('reasoningPref').value = s.reasoningPref
   el<HTMLInputElement>('sourceLang').value = s.sourceLang
   el<HTMLInputElement>('targetLang').value = s.targetLang
   el<HTMLInputElement>('autoTranslate').checked = s.autoTranslate
@@ -59,20 +65,20 @@ function fillForm(s: UserSettings): void {
   writeHotkeyHidden(s.hotkey)
   el<HTMLInputElement>('pausedHostnames').value = s.pausedHostnames.join(', ')
   updateConfigBadge(s)
+  updateProviderHint(s.provider)
 }
 
-/**
- * Build settings from the form.
- * If API Key input is blank, keep the previously stored key (common password-field UX).
- */
 function readForm(stored: UserSettings): UserSettings {
   const lensWidth = Number(el<HTMLInputElement>('lensWidthPx').value)
   const typedKey = el<HTMLInputElement>('apiKey').value
-  // Preserve existing key when field left empty (re-save other fields)
   const apiKey = typedKey.trim() ? typedKey : stored.apiKey
+  const provider = el<HTMLSelectElement>('provider').value as ProviderId
+  const reasoningPref = el<HTMLSelectElement>('reasoningPref').value as ReasoningPref
 
   return {
     ...stored,
+    provider,
+    reasoningPref,
     baseURL: el<HTMLInputElement>('baseURL').value.trim(),
     apiKey,
     model: el<HTMLInputElement>('model').value.trim(),
@@ -103,6 +109,36 @@ function updateConfigBadge(s: UserSettings): void {
     const miss = missingConfigFields(s).join('、')
     badge.textContent = `状态：未完成（缺少 ${miss || '配置'}）`
     badge.className = 'config-badge warn'
+  }
+}
+
+function updateProviderHint(provider: string): void {
+  const hint = el<HTMLElement>('providerHint')
+  if (provider === 'deepseek') {
+    hint.textContent =
+      'DeepSeek：默认写入 thinking.type=disabled（关思考）。Base 常用 https://api.deepseek.com'
+  } else if (provider === 'stepfun') {
+    hint.textContent =
+      'StepFun：默认 reasoning_effort=low（最低推理）。Base 常用 https://api.stepfun.com/v1 或 https://api.stepfun.ai/v1'
+  } else if (provider === 'openai') {
+    hint.textContent = '通用 OpenAI 兼容接口，不附加特殊思考参数。'
+  } else {
+    hint.textContent =
+      '自动识别 Base URL / 模型：DeepSeek 关 thinking；StepFun 用 reasoning_effort=low。'
+  }
+}
+
+function applyProviderPreset(id: string): void {
+  const preset = PROVIDER_PRESETS.find((p) => p.id === id)
+  if (!preset) return
+  const base = el<HTMLInputElement>('baseURL')
+  const model = el<HTMLInputElement>('model')
+  // Only fill empty or previous default-looking fields
+  if (!base.value.trim() || /openai\.com|deepseek\.com|stepfun\./i.test(base.value)) {
+    base.value = preset.baseURL
+  }
+  if (!model.value.trim() || /gpt-4o-mini|deepseek|step-/i.test(model.value)) {
+    model.value = preset.modelHint
   }
 }
 
@@ -154,13 +190,18 @@ async function init(): Promise<void> {
   fillForm(stored)
   setupHotkeyCapture()
 
+  el<HTMLSelectElement>('provider').addEventListener('change', () => {
+    const v = el<HTMLSelectElement>('provider').value
+    updateProviderHint(v)
+    if (v !== 'auto') applyProviderPreset(v)
+  })
+
   el<HTMLFormElement>('settings-form').addEventListener('submit', async (e) => {
     e.preventDefault()
     try {
       const next = readForm(stored)
       const missing = missingConfigFields(next)
       if (missing.length) {
-        // Still save so partial progress is kept, but warn clearly
         await saveSettings(next)
         stored = await loadSettings()
         fillForm(stored)
@@ -168,7 +209,6 @@ async function init(): Promise<void> {
         return
       }
       await saveSettings(next)
-      // Round-trip verify storage actually has the key
       stored = await loadSettings()
       fillForm(stored)
       if (isConfigured(stored)) {
