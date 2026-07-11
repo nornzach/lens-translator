@@ -10,11 +10,15 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "keywords": ["chrome-extension", "translation", "mv3"],
+  "keywords": [
+    "chrome-extension",
+    "translation",
+    "mv3"
+  ],
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@crxjs/vite-plugin": "^2.0.0-beta.33",
+    "@crxjs/vite-plugin": "^2.7.0",
     "@types/chrome": "^0.2.2",
     "@types/node": "^26.1.1",
     "typescript": "^7.0.2",

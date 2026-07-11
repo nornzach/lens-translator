@@ -4,7 +4,7 @@ export default defineManifest({
   manifest_version: 3,
   name: 'Lens Translator',
   description: 'Hold a hotkey to peek Chinese translations without leaving English immersion.',
-  version: '0.1.0',
+  version: '0.1.1',
   action: {
     default_popup: 'src/popup/index.html',
     default_title: 'Lens Translator',
@@ -14,13 +14,14 @@ export default defineManifest({
     open_in_tab: true,
   },
   background: {
-    service_worker: 'src/background/index.ts',
+    // Unique filename (not index.ts) — avoids CRXJS swapping SW/content bundles
+    service_worker: 'src/background/sw.ts',
     type: 'module',
   },
   content_scripts: [
     {
       matches: ['http://*/*', 'https://*/*'],
-      js: ['src/content/index.ts'],
+      js: ['src/content/main.ts'],
       run_at: 'document_idle',
     },
   ],
