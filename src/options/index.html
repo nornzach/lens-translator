@@ -2,11 +2,94 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Lens Translator Options</title>
+    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <h1>Lens Translator</h1>
-    <div id="app"></div>
+    <main class="page">
+      <header class="header">
+        <h1>Lens Translator</h1>
+        <p class="help">
+          按住 Alt+Shift+L 显示矩形透镜；松开消失；不会改页面英文。<br />
+          Hold Alt+Shift+L for the rectangular lens; release to hide. Page English stays untouched.
+        </p>
+      </header>
+
+      <form id="settings-form" class="form" autocomplete="off">
+        <section class="card">
+          <h2>API</h2>
+          <label>
+            Base URL
+            <input id="baseURL" name="baseURL" type="url" placeholder="https://api.openai.com/v1" />
+          </label>
+          <label>
+            API Key
+            <input id="apiKey" name="apiKey" type="password" placeholder="sk-..." autocomplete="off" />
+          </label>
+          <label>
+            Model
+            <input id="model" name="model" type="text" placeholder="gpt-4o-mini" />
+          </label>
+        </section>
+
+        <section class="card">
+          <h2>Languages &amp; behavior</h2>
+          <div class="row">
+            <label>
+              Source lang
+              <input id="sourceLang" name="sourceLang" type="text" placeholder="en" />
+            </label>
+            <label>
+              Target lang
+              <input id="targetLang" name="targetLang" type="text" placeholder="zh" />
+            </label>
+          </div>
+          <label class="checkbox">
+            <input id="autoTranslate" name="autoTranslate" type="checkbox" />
+            Auto-translate visible blocks
+          </label>
+          <label>
+            Lens width (px)
+            <input id="lensWidthPx" name="lensWidthPx" type="number" min="120" max="800" step="1" />
+          </label>
+        </section>
+
+        <section class="card">
+          <h2>Hotkey</h2>
+          <p class="hint">Use KeyboardEvent.code for the key (e.g. KeyL).</p>
+          <div class="hotkey-row">
+            <label class="checkbox"><input id="hotkeyAlt" type="checkbox" /> Alt</label>
+            <label class="checkbox"><input id="hotkeyShift" type="checkbox" /> Shift</label>
+            <label class="checkbox"><input id="hotkeyCtrl" type="checkbox" /> Ctrl</label>
+            <label class="checkbox"><input id="hotkeyMeta" type="checkbox" /> Meta</label>
+          </div>
+          <label>
+            Code
+            <input id="hotkeyCode" type="text" placeholder="KeyL" />
+          </label>
+        </section>
+
+        <section class="card">
+          <h2>Paused hostnames</h2>
+          <label>
+            Comma-separated list
+            <input
+              id="pausedHostnames"
+              name="pausedHostnames"
+              type="text"
+              placeholder="example.com, news.ycombinator.com"
+            />
+          </label>
+        </section>
+
+        <div class="actions">
+          <button type="submit" id="save" class="btn primary">Save</button>
+          <button type="button" id="reset" class="btn">Reset to defaults</button>
+          <span id="status" class="status" role="status" aria-live="polite"></span>
+        </div>
+      </form>
+    </main>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>
