@@ -1,1 +1,170 @@
-console.log('Lens Translator content script loaded')
+import { matchesHotkey } from '../shared/hotkey'
+import type { UserSettings } from '../shared/settings-defaults'
+import { DEFAULT_SETTINGS } from '../shared/settings-defaults'
+import type { TranslateBatchResultErr, TranslateBatchResultOk } from '../shared/messages'
+import { extractVisibleBlocks } from './extract'
+import { BlockRegistry } from './registry'
+import { LensOverlay } from './lens'
+import { makePageKey } from './page-key'
+import { isHostnamePaused } from './pause'
+
+const registry = new BlockRegistry()
+const lens = new LensOverlay()
+let settings: UserSettings = DEFAULT_SETTINGS
+let lensActive = false
+let lastMouse = { x: 0, y: 0 }
+let translating = false
+
+async function refreshSettings(): Promise<void> {
+  const res = await chrome.runtime.sendMessage({ type: 'get-settings' })
+  if (res?.type === 'settings') {
+    settings = res.settings
+    lens.setWidth(settings.lensWidthPx)
+  }
+}
+
+function disabledHere(): boolean {
+  return isHostnamePaused(location.hostname, settings.pausedHostnames)
+}
+
+async function scanAndTranslate(): Promise<void> {
+  if (disabledHere() || !settings.autoTranslate) return
+  const margin = Math.round(window.innerHeight * settings.prefetchMarginRatio)
+  const blocks = extractVisibleBlocks(settings.minTextLength, margin)
+  for (const b of blocks) {
+    registry.upsert({ id: b.id, el: b.el, tag: b.tag, text: b.text })
+  }
+  const pending = registry.pendingBlocks()
+  if (!pending.length || translating) return
+  translating = true
+  try {
+    const res = (await chrome.runtime.sendMessage({
+      type: 'translate-batch',
+      pageKey: makePageKey(),
+      blocks: pending,
+    })) as TranslateBatchResultOk | TranslateBatchResultErr
+
+    const list =
+      res && 'translations' in res && Array.isArray((res as TranslateBatchResultOk).translations)
+        ? (res as TranslateBatchResultOk).translations
+        : ((res as TranslateBatchResultErr & {
+            translations?: { id: string; translation: string }[]
+          }).translations ?? [])
+
+    for (const t of list) registry.setTranslation(t.id, t.translation)
+    if (res && res.ok === false) {
+      for (const id of res.failedIds ?? pending.map((p) => p.id)) {
+        if (!registry.get(id)?.translation) registry.setError(id, res.error)
+      }
+    }
+  } finally {
+    translating = false
+  }
+  if (lensActive) updateLens()
+}
+
+function updateLens(): void {
+  if (!lensActive) {
+    lens.hide()
+    return
+  }
+  // Host uses pointer-events: none; still filter it out of the hit stack
+  const host = lens.getHost()
+  const stack = document
+    .elementsFromPoint(lastMouse.x, lastMouse.y)
+    .filter((el) => el !== host && !host.contains(el))
+  const hit = stack[0] ?? null
+  const entry = registry.getByElement(hit)
+
+  if (!settings.apiKey?.trim() || !settings.model?.trim() || !settings.baseURL?.trim()) {
+    lens.showAt(lastMouse.x, lastMouse.y, { kind: 'unconfigured' })
+    lens.highlight(null)
+    return
+  }
+
+  if (!entry) {
+    lens.showAt(lastMouse.x, lastMouse.y, { kind: 'empty' })
+    lens.highlight(null)
+    return
+  }
+
+  // Never rewrite page text — only show translation in the lens overlay
+  lens.highlight(entry.el)
+  if (entry.status === 'ready' && entry.translation) {
+    lens.showAt(lastMouse.x, lastMouse.y, { kind: 'ready', text: entry.translation })
+  } else if (entry.status === 'error') {
+    lens.showAt(lastMouse.x, lastMouse.y, {
+      kind: 'error',
+      message: entry.error ?? '翻译失败',
+    })
+  } else {
+    lens.showAt(lastMouse.x, lastMouse.y, { kind: 'pending' })
+    void scanAndTranslate()
+  }
+}
+
+function onKeyDown(e: KeyboardEvent): void {
+  if (disabledHere()) return
+  if (!matchesHotkey(e, settings.hotkey)) return
+  e.preventDefault()
+  if (!lensActive) {
+    lensActive = true
+    updateLens()
+  }
+}
+
+function onKeyUp(e: KeyboardEvent): void {
+  if (!lensActive) return
+  // Release when any part of the chord is released
+  if (
+    e.code === settings.hotkey.code ||
+    (settings.hotkey.altKey && e.key === 'Alt') ||
+    (settings.hotkey.shiftKey && e.key === 'Shift') ||
+    (settings.hotkey.ctrlKey && e.key === 'Control') ||
+    (settings.hotkey.metaKey && e.key === 'Meta')
+  ) {
+    lensActive = false
+    lens.hide()
+  }
+}
+
+function onBlur(): void {
+  lensActive = false
+  lens.hide()
+}
+
+function onMouseMove(e: MouseEvent): void {
+  lastMouse = { x: e.clientX, y: e.clientY }
+  if (lensActive) updateLens()
+}
+
+function debounce<T extends (...args: unknown[]) => void>(fn: T, ms: number): T {
+  let t = 0
+  return ((...args: unknown[]) => {
+    window.clearTimeout(t)
+    t = window.setTimeout(() => fn(...args), ms)
+  }) as T
+}
+
+async function main(): Promise<void> {
+  await refreshSettings()
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.settings) void refreshSettings()
+  })
+
+  window.addEventListener('keydown', onKeyDown, true)
+  window.addEventListener('keyup', onKeyUp, true)
+  window.addEventListener('blur', onBlur)
+  window.addEventListener('mousemove', onMouseMove, true)
+
+  const scheduleScan = debounce(() => void scanAndTranslate(), 300)
+  window.addEventListener('scroll', scheduleScan, true)
+  window.addEventListener('resize', scheduleScan)
+
+  const mo = new MutationObserver(debounce(() => void scanAndTranslate(), 500))
+  mo.observe(document.documentElement, { childList: true, subtree: true })
+
+  void scanAndTranslate()
+}
+
+void main()
