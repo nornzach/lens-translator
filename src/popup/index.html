@@ -7,39 +7,58 @@
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main class="popup">
-      <header>
-        <h1>Lens Translator</h1>
-        <p class="subtitle" id="hotkeyHint">按住快捷键偷看中文</p>
-        <p class="tip-static">须在普通网页使用（http/https），并<strong>刷新页面</strong>后再试。短按可固定透镜，再按或 Esc 关闭。</p>
-      </header>
+    <div class="shell">
+      <div class="glow glow-a" aria-hidden="true"></div>
+      <div class="glow glow-b" aria-hidden="true"></div>
 
-      <section class="card">
-        <div class="row">
-          <span class="label">当前站点</span>
-          <span id="hostname" class="value mono">—</span>
-        </div>
-        <label class="checkbox" id="pause-label">
-          <input id="pauseToggle" type="checkbox" disabled />
-          暂停此站
-        </label>
-      </section>
+      <main class="popup glass">
+        <header class="header">
+          <div class="brand">
+            <span class="logo" aria-hidden="true"></span>
+            <div>
+              <h1>Lens</h1>
+              <p class="subtitle" id="hotkeyHint">按住快捷键偷看中文</p>
+            </div>
+          </div>
+        </header>
 
-      <section class="card">
-        <div class="row">
-          <span class="label">API</span>
-          <span id="apiStatus" class="value">…</span>
-        </div>
-        <div class="row">
-          <span class="label">自动预译</span>
-          <span id="autoStatus" class="value">…</span>
-        </div>
-      </section>
+        <section class="card glass-inner">
+          <div class="row">
+            <span class="label">当前站点</span>
+            <span id="hostname" class="value mono">—</span>
+          </div>
+          <label class="switch-row">
+            <span class="switch-text">暂停此站</span>
+            <input id="pauseToggle" type="checkbox" class="switch" disabled />
+          </label>
+        </section>
 
-      <button type="button" id="openOptions" class="btn primary">打开设置</button>
-      <p id="unconfiguredTip" class="tip" hidden>尚未配置 API，请先打开设置填写 Base URL、Key 与模型。</p>
-      <p id="error" class="error" hidden></p>
-    </main>
+        <section class="card glass-inner">
+          <div class="row">
+            <span class="label">API</span>
+            <span id="apiStatus" class="pill">…</span>
+          </div>
+          <label class="switch-row">
+            <div class="switch-text-block">
+              <span class="switch-text">自动预译可见区</span>
+              <span class="switch-desc" id="modeDesc">关：仅透镜下的块才翻译</span>
+            </div>
+            <input id="autoToggle" type="checkbox" class="switch" />
+          </label>
+        </section>
+
+        <p class="hint" id="usageHint">
+          默认按需翻译并缓存；移到已译过的块不会重复请求。
+        </p>
+
+        <button type="button" id="openOptions" class="btn primary">
+          <span>打开设置</span>
+        </button>
+
+        <p id="unconfiguredTip" class="tip" hidden></p>
+        <p id="error" class="error" hidden></p>
+      </main>
+    </div>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

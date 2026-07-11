@@ -1,6 +1,7 @@
 import {
   isConfigured,
   loadSettings,
+  saveSettings,
   missingConfigFields,
   type UserSettings,
 } from '../shared/settings'
@@ -29,19 +30,21 @@ function renderStatus(settings: UserSettings): void {
   const api = el<HTMLElement>('apiStatus')
   if (configured) {
     api.textContent = '已配置'
-    api.className = 'value status-ok'
+    api.className = 'pill ok'
   } else {
     const miss = missingConfigFields(settings)
     api.textContent = miss.length ? `缺 ${miss.join('/')}` : '未配置'
-    api.className = 'value status-warn'
+    api.className = 'pill warn'
   }
 
-  const auto = el<HTMLElement>('autoStatus')
-  auto.textContent = settings.autoTranslate ? '开' : '关'
-  auto.className = 'value'
+  const auto = el<HTMLInputElement>('autoToggle')
+  auto.checked = settings.autoTranslate
+  el<HTMLElement>('modeDesc').textContent = settings.autoTranslate
+    ? '开：进入页面会预译可见区（可能较慢）'
+    : '关：仅透镜对准的块才翻译（推荐）'
 
   const label = formatHotkeyLabel(settings.hotkey)
-  el<HTMLElement>('hotkeyHint').textContent = `按住 ${label} 偷看中文`
+  el<HTMLElement>('hotkeyHint').textContent = `按住 ${label} · 短按可固定`
 
   const tip = el<HTMLElement>('unconfiguredTip')
   if (configured) {
@@ -50,8 +53,8 @@ function renderStatus(settings: UserSettings): void {
     tip.hidden = false
     const miss = missingConfigFields(settings)
     tip.textContent = miss.length
-      ? `尚未配置完整：请填写 ${miss.join('、')}（打开设置后点「保存」）。`
-      : '尚未配置 API，请先打开设置填写并保存。'
+      ? `尚未配置完整：请填写 ${miss.join('、')}`
+      : '尚未配置 API，请打开设置填写并保存。'
   }
 }
 
@@ -76,34 +79,50 @@ async function init(): Promise<void> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   const hostname = hostnameFromUrl(tab?.url)
   const hostnameEl = el<HTMLElement>('hostname')
-  const toggle = el<HTMLInputElement>('pauseToggle')
+  const pauseToggle = el<HTMLInputElement>('pauseToggle')
+  const autoToggle = el<HTMLInputElement>('autoToggle')
 
   if (!hostname) {
     hostnameEl.textContent = '（无法读取此页）'
-    toggle.disabled = true
+    pauseToggle.disabled = true
   } else {
     hostnameEl.textContent = hostname
-    toggle.disabled = false
+    pauseToggle.disabled = false
   }
 
   let settings = await loadSettings()
   renderStatus(settings)
 
   if (hostname) {
-    toggle.checked = settings.pausedHostnames.includes(hostname)
-    toggle.addEventListener('change', async () => {
+    pauseToggle.checked = settings.pausedHostnames.includes(hostname)
+    pauseToggle.addEventListener('change', async () => {
       try {
         el<HTMLElement>('error').hidden = true
-        settings = await setHostnamePaused(hostname, toggle.checked)
+        settings = await setHostnamePaused(hostname, pauseToggle.checked)
         renderStatus(settings)
       } catch (err) {
-        toggle.checked = !toggle.checked
+        pauseToggle.checked = !pauseToggle.checked
         const error = el<HTMLElement>('error')
         error.hidden = false
         error.textContent = err instanceof Error ? err.message : String(err)
       }
     })
   }
+
+  autoToggle.addEventListener('change', async () => {
+    try {
+      el<HTMLElement>('error').hidden = true
+      const next: UserSettings = { ...settings, autoTranslate: autoToggle.checked }
+      await saveSettings(next)
+      settings = await loadSettings()
+      renderStatus(settings)
+    } catch (err) {
+      autoToggle.checked = !autoToggle.checked
+      const error = el<HTMLElement>('error')
+      error.hidden = false
+      error.textContent = err instanceof Error ? err.message : String(err)
+    }
+  })
 }
 
 void init()

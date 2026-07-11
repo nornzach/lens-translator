@@ -27,7 +27,8 @@ export const DEFAULT_SETTINGS: UserSettings = {
   model: 'gpt-4o-mini',
   sourceLang: 'en',
   targetLang: 'zh',
-  autoTranslate: true,
+  /** Default off: only translate the block under the lens (fast first paint). */
+  autoTranslate: false,
   lensWidthPx: 320,
   minTextLength: 10,
   batchCharLimit: 6000,

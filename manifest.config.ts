@@ -4,7 +4,7 @@ export default defineManifest({
   manifest_version: 3,
   name: 'Lens Translator',
   description: 'Hold a hotkey to peek Chinese translations without leaving English immersion.',
-  version: '0.1.2',
+  version: '0.1.3',
   action: {
     default_popup: 'src/popup/index.html',
     default_title: 'Lens Translator',
