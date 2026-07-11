@@ -1,4 +1,9 @@
-import { isConfigured, loadSettings, type UserSettings } from '../shared/settings'
+import {
+  isConfigured,
+  loadSettings,
+  missingConfigFields,
+  type UserSettings,
+} from '../shared/settings'
 import { formatHotkeyLabel } from '../shared/hotkey'
 import type { PauseHostnameMsg, SettingsMsg } from '../shared/messages'
 
@@ -26,7 +31,8 @@ function renderStatus(settings: UserSettings): void {
     api.textContent = '已配置'
     api.className = 'value status-ok'
   } else {
-    api.textContent = '未配置'
+    const miss = missingConfigFields(settings)
+    api.textContent = miss.length ? `缺 ${miss.join('/')}` : '未配置'
     api.className = 'value status-warn'
   }
 
@@ -38,7 +44,15 @@ function renderStatus(settings: UserSettings): void {
   el<HTMLElement>('hotkeyHint').textContent = `按住 ${label} 偷看中文`
 
   const tip = el<HTMLElement>('unconfiguredTip')
-  tip.hidden = configured
+  if (configured) {
+    tip.hidden = true
+  } else {
+    tip.hidden = false
+    const miss = missingConfigFields(settings)
+    tip.textContent = miss.length
+      ? `尚未配置完整：请填写 ${miss.join('、')}（打开设置后点「保存」）。`
+      : '尚未配置 API，请先打开设置填写并保存。'
+  }
 }
 
 async function setHostnamePaused(hostname: string, paused: boolean): Promise<UserSettings> {

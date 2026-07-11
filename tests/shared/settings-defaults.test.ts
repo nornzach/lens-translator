@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { DEFAULT_SETTINGS, mergeSettings } from '../../src/shared/settings-defaults'
+import {
+  DEFAULT_SETTINGS,
+  mergeSettings,
+  isConfigured,
+  missingConfigFields,
+} from '../../src/shared/settings-defaults'
 
 describe('DEFAULT_SETTINGS', () => {
   it('defaults to en→zh with autoTranslate on', () => {
@@ -31,5 +36,29 @@ describe('mergeSettings', () => {
   it('preserves pausedHostnames when provided', () => {
     const merged = mergeSettings({ pausedHostnames: ['example.com'] })
     expect(merged.pausedHostnames).toEqual(['example.com'])
+  })
+
+  it('coerces non-string fields from storage', () => {
+    const merged = mergeSettings({
+      baseURL: 123 as unknown as string,
+      apiKey: null as unknown as string,
+      model: undefined,
+    })
+    expect(merged.baseURL).toBe('123')
+    expect(merged.apiKey).toBe('')
+    expect(merged.model).toBe(DEFAULT_SETTINGS.model)
+  })
+})
+
+describe('isConfigured', () => {
+  it('requires baseURL, apiKey, and model', () => {
+    expect(isConfigured(DEFAULT_SETTINGS)).toBe(false)
+    expect(
+      isConfigured({
+        ...DEFAULT_SETTINGS,
+        apiKey: 'sk-x',
+      }),
+    ).toBe(true)
+    expect(missingConfigFields(DEFAULT_SETTINGS)).toContain('API Key')
   })
 })

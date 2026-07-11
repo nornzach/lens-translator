@@ -1,6 +1,6 @@
 import { mergeSettings, type UserSettings } from './settings-defaults'
 
-const STORAGE_KEY = 'settings'
+export const STORAGE_KEY = 'settings'
 
 export async function loadSettings(): Promise<UserSettings> {
   const result = await chrome.storage.local.get(STORAGE_KEY)
@@ -11,5 +11,10 @@ export async function saveSettings(settings: UserSettings): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEY]: settings })
 }
 
-export { DEFAULT_SETTINGS, mergeSettings, isConfigured } from './settings-defaults'
+export {
+  DEFAULT_SETTINGS,
+  mergeSettings,
+  isConfigured,
+  missingConfigFields,
+} from './settings-defaults'
 export type { UserSettings, HotkeyConfig } from './settings-defaults'

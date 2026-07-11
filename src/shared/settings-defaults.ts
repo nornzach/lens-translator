@@ -47,11 +47,31 @@ export function mergeSettings(partial: Partial<UserSettings> | null | undefined)
   return {
     ...DEFAULT_SETTINGS,
     ...p,
+    // Normalize strings in case storage returned unexpected types
+    baseURL: String(p.baseURL ?? DEFAULT_SETTINGS.baseURL ?? ''),
+    apiKey: String(p.apiKey ?? DEFAULT_SETTINGS.apiKey ?? ''),
+    model: String(p.model ?? DEFAULT_SETTINGS.model ?? ''),
+    sourceLang: String(p.sourceLang ?? DEFAULT_SETTINGS.sourceLang),
+    targetLang: String(p.targetLang ?? DEFAULT_SETTINGS.targetLang),
     hotkey: { ...DEFAULT_SETTINGS.hotkey, ...(p.hotkey ?? {}) },
-    pausedHostnames: p.pausedHostnames ?? DEFAULT_SETTINGS.pausedHostnames,
+    pausedHostnames: Array.isArray(p.pausedHostnames)
+      ? p.pausedHostnames.map(String)
+      : DEFAULT_SETTINGS.pausedHostnames,
   }
 }
 
 export function isConfigured(settings: UserSettings): boolean {
-  return Boolean(settings.baseURL.trim() && settings.apiKey.trim() && settings.model.trim())
+  const baseURL = settings.baseURL?.trim() ?? ''
+  const apiKey = settings.apiKey?.trim() ?? ''
+  const model = settings.model?.trim() ?? ''
+  return baseURL.length > 0 && apiKey.length > 0 && model.length > 0
+}
+
+/** Human-readable list of missing required API fields. */
+export function missingConfigFields(settings: UserSettings): string[] {
+  const missing: string[] = []
+  if (!(settings.baseURL?.trim() ?? '')) missing.push('Base URL')
+  if (!(settings.apiKey?.trim() ?? '')) missing.push('API Key')
+  if (!(settings.model?.trim() ?? '')) missing.push('模型')
+  return missing
 }

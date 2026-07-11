@@ -1,7 +1,7 @@
 import { matchesHotkey } from '../shared/hotkey'
 import type { UserSettings } from '../shared/settings-defaults'
-import { DEFAULT_SETTINGS } from '../shared/settings-defaults'
-import { mergeSettings } from '../shared/settings-defaults'
+import { DEFAULT_SETTINGS, isConfigured, mergeSettings } from '../shared/settings-defaults'
+import { loadSettings } from '../shared/settings'
 import type { TranslateBatchResultErr, TranslateBatchResultOk } from '../shared/messages'
 import { extractVisibleBlocks } from './extract'
 import { BlockRegistry } from './registry'
@@ -49,12 +49,11 @@ function ensureMouseSeed(): void {
 
 async function refreshSettings(): Promise<void> {
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'get-settings' })
-    if (res?.type !== 'settings') return
-
-    // mergeSettings guards partial payloads / missing hotkey
-    settings = mergeSettings(res.settings)
-    configured = Boolean(res.configured)
+    // Read storage directly so "configured" is accurate even if SW is stale.
+    // Keep apiKey out of long-lived content state (strip after check).
+    const full = await loadSettings()
+    configured = isConfigured(full)
+    settings = mergeSettings({ ...full, apiKey: '' })
     lens.setWidth(settings.lensWidthPx)
 
     const sig = translateSigOf(settings, configured)
@@ -66,6 +65,13 @@ async function refreshSettings(): Promise<void> {
       if (prev !== '') registry.resetErrorsToPending()
       void scanAndTranslate({ force: true })
     }
+
+    console.info('[Lens Translator] settings', {
+      configured,
+      baseURL: settings.baseURL,
+      model: settings.model,
+      hasKey: Boolean(full.apiKey?.trim()),
+    })
   } catch (err) {
     console.warn('[Lens Translator] refreshSettings failed', err)
   }

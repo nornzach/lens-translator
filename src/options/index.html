@@ -18,17 +18,33 @@
       <form id="settings-form" class="form" autocomplete="off">
         <section class="card">
           <h2>API（OpenAI 兼容）</h2>
+          <p id="configBadge" class="config-badge warn">状态：检测中…</p>
           <label>
             Base URL
-            <input id="baseURL" name="baseURL" type="url" placeholder="https://api.openai.com/v1" />
+            <input
+              id="baseURL"
+              name="baseURL"
+              type="text"
+              inputmode="url"
+              spellcheck="false"
+              placeholder="https://api.openai.com/v1"
+            />
           </label>
           <label>
             API Key
-            <input id="apiKey" name="apiKey" type="password" placeholder="sk-..." autocomplete="off" />
+            <input
+              id="apiKey"
+              name="apiKey"
+              type="password"
+              placeholder="sk-... 或供应商密钥"
+              autocomplete="off"
+              spellcheck="false"
+            />
           </label>
+          <p class="hint">再次保存时若 Key 留空，将保留已保存的密钥（不会被清空）。</p>
           <label>
             模型
-            <input id="model" name="model" type="text" placeholder="gpt-4o-mini" />
+            <input id="model" name="model" type="text" placeholder="gpt-4o-mini" spellcheck="false" />
           </label>
         </section>
 
