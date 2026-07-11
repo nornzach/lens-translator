@@ -30,11 +30,12 @@ Any OpenAI-compatible Chat Completions endpoint works (same path shape: `{baseUR
 ## Usage
 
 1. Browse an English page with the extension loaded and API configured.
-2. **Hold `Option+Shift+L`** (default on Mac; Alt+Shift+L on Windows/Linux). Rebind via Options → **录制快捷键**.
-3. Move the pointer over a text block — a rectangular lens shows Chinese for that block and a ring highlight on the source.
-4. **Release** the hotkey — lens and highlight vanish; the page stays English.
+2. Open a normal **http/https** page and **refresh** after installing/configuring.
+3. **Hold `Option+Shift+L`** (Mac; Alt+Shift+L on Windows/Linux), or **short-press** to pin the lens. Rebind via Options → **录制快捷键**.
+4. Move the pointer over a paragraph — Chinese appears in the rectangular lens.
+5. Release (hold mode) / press hotkey again or **Esc** (sticky mode) to hide.
 
-If API is not configured, holding the hotkey opens the Options page (throttled).
+If nothing happens: check the page console for `[Lens Translator] ready`, and ensure you are not on `chrome://` pages.
 
 Popup:
 

@@ -1,10 +1,10 @@
 export type LensViewState =
   | { kind: 'hidden' }
-  | { kind: 'ready'; text: string }
-  | { kind: 'pending' }
-  | { kind: 'empty' }
-  | { kind: 'error'; message: string }
-  | { kind: 'unconfigured' }
+  | { kind: 'ready'; text: string; stickyHint?: boolean }
+  | { kind: 'pending'; stickyHint?: boolean }
+  | { kind: 'empty'; stickyHint?: boolean }
+  | { kind: 'error'; message: string; stickyHint?: boolean }
+  | { kind: 'unconfigured'; stickyHint?: boolean }
 
 export class LensOverlay {
   private host: HTMLDivElement
@@ -12,6 +12,7 @@ export class LensOverlay {
   private panel: HTMLDivElement
   private label: HTMLDivElement
   private body: HTMLDivElement
+  private hint: HTMLDivElement
   private ring: HTMLDivElement
   private highlightEl: Element | null = null
   private widthPx: number
@@ -52,6 +53,12 @@ export class LensOverlay {
       }
       .body { white-space: pre-wrap; word-break: break-word; }
       .muted { color: #94a3b8; }
+      .hint {
+        margin-top: 8px;
+        font-size: 10px;
+        color: #64748b;
+        line-height: 1.35;
+      }
       .ring {
         position: fixed;
         box-sizing: border-box;
@@ -76,7 +83,9 @@ export class LensOverlay {
     this.label.textContent = '中文'
     this.body = document.createElement('div')
     this.body.className = 'body'
-    this.panel.append(this.label, this.body)
+    this.hint = document.createElement('div')
+    this.hint.className = 'hint'
+    this.panel.append(this.label, this.body, this.hint)
     this.root.append(style, this.ring, this.panel)
     this.applyWidth()
   }
@@ -109,7 +118,8 @@ export class LensOverlay {
     this.panel.style.display = 'block'
     this.body.classList.remove('muted', 'pending-anim')
 
-    // Only textContent for translations — never innerHTML
+    const sticky = 'stickyHint' in state ? Boolean(state.stickyHint) : false
+
     switch (state.kind) {
       case 'ready':
         this.body.textContent = state.text
@@ -120,7 +130,7 @@ export class LensOverlay {
         break
       case 'empty':
         this.body.classList.add('muted')
-        this.body.textContent = '此处无可译文本'
+        this.body.textContent = '此处无可译文本（请移到段落上）'
         break
       case 'error':
         this.body.classList.add('muted')
@@ -128,20 +138,26 @@ export class LensOverlay {
         break
       case 'unconfigured':
         this.body.classList.add('muted')
-        this.body.textContent = '请先配置 API（已尝试打开设置页）'
+        this.body.textContent = '请先在扩展「选项」中配置 API'
         break
     }
 
-    // Measure after content set
+    this.hint.textContent = sticky
+      ? '已固定 · 再按快捷键或 Esc 关闭'
+      : '按住快捷键保持 · 短按可固定'
+
     const offset = 16
+    // Force layout so size is accurate
     const rect = this.panel.getBoundingClientRect()
     let left = clientX + offset
     let top = clientY + offset
     const vw = window.innerWidth
     const vh = window.innerHeight
-    if (left + rect.width > vw - 8) left = clientX - rect.width - offset
+    if (left + Math.max(rect.width, this.widthPx) > vw - 8) {
+      left = clientX - Math.max(rect.width, this.widthPx) - offset
+    }
     if (top + rect.height > vh - 8) top = clientY - rect.height - offset
-    left = Math.max(8, left)
+    left = Math.max(8, Math.min(left, vw - this.widthPx - 8))
     top = Math.max(8, top)
     this.panel.style.left = `${left}px`
     this.panel.style.top = `${top}px`
