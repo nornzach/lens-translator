@@ -4,3 +4,5 @@ node_modules/
 *.log
 dist/
 .chrome-extension-profile/
+
+.worktrees/
