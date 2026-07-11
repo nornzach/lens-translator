@@ -1,28 +1,50 @@
 export type LensViewState =
   | { kind: 'hidden' }
-  | { kind: 'ready'; text: string; stickyHint?: boolean }
-  | { kind: 'pending'; stickyHint?: boolean }
+  | {
+      kind: 'ready'
+      /** Chinese translation */
+      text: string
+      /** English (or source) original for side-by-side learning */
+      sourceText: string
+      stickyHint?: boolean
+      sourceRect?: DOMRect
+    }
+  | {
+      kind: 'pending'
+      sourceText?: string
+      stickyHint?: boolean
+      sourceRect?: DOMRect
+    }
   | { kind: 'empty'; stickyHint?: boolean }
-  | { kind: 'error'; message: string; stickyHint?: boolean }
+  | {
+      kind: 'error'
+      message: string
+      sourceText?: string
+      stickyHint?: boolean
+      sourceRect?: DOMRect
+    }
   | { kind: 'unconfigured'; stickyHint?: boolean }
 
 /**
- * Rectangular lens with Apple-style liquid glass layers
- * (wrapper / effect / tint / shine / text) + SVG turbulence distortion.
+ * Liquid-glass lens: bilingual EN/ZH panel placed **beside** the source
+ * (never covering the original reading text).
  */
 export class LensOverlay {
   private host: HTMLDivElement
   private root: ShadowRoot
   private panel: HTMLDivElement
   private textLayer: HTMLDivElement
-  private label: HTMLDivElement
+  private sourceLabel: HTMLDivElement
+  private sourceBody: HTMLDivElement
+  private zhLabel: HTMLDivElement
   private body: HTMLDivElement
+  private divider: HTMLDivElement
   private hint: HTMLDivElement
   private ring: HTMLDivElement
   private highlightEl: Element | null = null
   private widthPx: number
 
-  constructor(widthPx = 320) {
+  constructor(widthPx = 340) {
     this.widthPx = widthPx
     this.host = document.createElement('div')
     this.host.id = 'lens-translator-root'
@@ -38,7 +60,6 @@ export class LensOverlay {
     const style = document.createElement('style')
     style.textContent = LENS_STYLES
 
-    // SVG filter for liquid glass distortion (referenced by filter: url(#glass-distortion))
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
     svg.setAttribute('aria-hidden', 'true')
     svg.setAttribute('width', '0')
@@ -54,8 +75,10 @@ export class LensOverlay {
       </defs>
     `
 
+    // Thin outline only — no blur/frost over original text
     this.ring = document.createElement('div')
-    this.ring.className = 'ring liquidGlass-wrapper'
+    this.ring.className = 'source-outline'
+    this.ring.style.display = 'none'
 
     this.panel = document.createElement('div')
     this.panel.className = 'liquidGlass-wrapper panel'
@@ -71,29 +94,35 @@ export class LensOverlay {
     this.textLayer = document.createElement('div')
     this.textLayer.className = 'liquidGlass-text'
 
-    this.label = document.createElement('div')
-    this.label.className = 'label'
-    this.label.textContent = '中文'
+    this.sourceLabel = document.createElement('div')
+    this.sourceLabel.className = 'label label-en'
+    this.sourceLabel.textContent = 'EN'
+
+    this.sourceBody = document.createElement('div')
+    this.sourceBody.className = 'body body-en'
+
+    this.divider = document.createElement('div')
+    this.divider.className = 'divider'
+
+    this.zhLabel = document.createElement('div')
+    this.zhLabel.className = 'label label-zh'
+    this.zhLabel.textContent = '中文'
 
     this.body = document.createElement('div')
-    this.body.className = 'body'
+    this.body.className = 'body body-zh'
 
     this.hint = document.createElement('div')
     this.hint.className = 'hint'
 
-    this.textLayer.append(this.label, this.body, this.hint)
+    this.textLayer.append(
+      this.sourceLabel,
+      this.sourceBody,
+      this.divider,
+      this.zhLabel,
+      this.body,
+      this.hint,
+    )
     this.panel.append(effect, tint, shine, this.textLayer)
-
-    // Ring layers (highlight around source block)
-    const rEffect = document.createElement('div')
-    rEffect.className = 'liquidGlass-effect'
-    const rTint = document.createElement('div')
-    rTint.className = 'liquidGlass-tint ring-tint'
-    const rShine = document.createElement('div')
-    rShine.className = 'liquidGlass-shine'
-    this.ring.append(rEffect, rTint, rShine)
-    this.ring.style.display = 'none'
-
     this.root.append(style, svg, this.ring, this.panel)
     this.applyWidth()
   }
@@ -113,7 +142,7 @@ export class LensOverlay {
   }
 
   setWidth(widthPx: number): void {
-    this.widthPx = widthPx
+    this.widthPx = Math.max(280, widthPx)
     this.applyWidth()
   }
 
@@ -126,47 +155,153 @@ export class LensOverlay {
     this.panel.style.display = 'flex'
     this.panel.classList.add('is-visible')
     this.body.classList.remove('muted', 'pending-anim')
+    this.sourceBody.classList.remove('muted')
 
     const sticky = 'stickyHint' in state ? Boolean(state.stickyHint) : false
+    const sourceText =
+      'sourceText' in state && state.sourceText ? state.sourceText : ''
+
+    // Bilingual sections
+    const showSource = Boolean(sourceText)
+    this.sourceLabel.hidden = !showSource
+    this.sourceBody.hidden = !showSource
+    this.divider.hidden = !showSource
+    this.zhLabel.hidden = state.kind === 'empty' || state.kind === 'unconfigured'
+
+    if (showSource) {
+      this.sourceBody.textContent = sourceText
+    } else {
+      this.sourceBody.textContent = ''
+    }
 
     switch (state.kind) {
       case 'ready':
+        this.zhLabel.textContent = '中文'
         this.body.textContent = state.text
         break
       case 'pending':
+        this.zhLabel.textContent = '中文'
         this.body.classList.add('muted', 'pending-anim')
         this.body.textContent = '翻译中…'
         break
       case 'empty':
+        this.sourceLabel.hidden = true
+        this.sourceBody.hidden = true
+        this.divider.hidden = true
+        this.zhLabel.hidden = true
         this.body.classList.add('muted')
-        this.body.textContent = '此处无可译文本（请移到段落上）'
+        this.body.textContent = '此处无可译文本（请移到文字上）'
         break
       case 'error':
+        this.zhLabel.textContent = '中文'
         this.body.classList.add('muted')
         this.body.textContent = state.message
         break
       case 'unconfigured':
+        this.sourceLabel.hidden = true
+        this.sourceBody.hidden = true
+        this.divider.hidden = true
+        this.zhLabel.hidden = true
         this.body.classList.add('muted')
         this.body.textContent = '请先在扩展「选项」中配置 API'
         break
     }
 
     this.hint.textContent = sticky
-      ? '已固定 · 再按快捷键或 Esc 关闭'
-      : '按住快捷键保持 · 短按可固定'
+      ? '已固定 · 再按快捷键或 Esc 关闭 · 原文不被遮挡'
+      : '按住保持 · 短按固定 · 气泡避开原文便于对照'
 
-    const offset = 16
-    const rect = this.panel.getBoundingClientRect()
-    let left = clientX + offset
-    let top = clientY + offset
+    const sourceRect =
+      'sourceRect' in state && state.sourceRect ? state.sourceRect : null
+    this.placePanel(clientX, clientY, sourceRect)
+  }
+
+  /**
+   * Place glass panel **outside** the source rect so original text stays fully readable.
+   * Prefer below → above → right → left of source; fall back to cursor offset.
+   */
+  private placePanel(clientX: number, clientY: number, sourceRect: DOMRect | null): void {
+    const gap = 12
     const vw = window.innerWidth
     const vh = window.innerHeight
-    if (left + Math.max(rect.width, this.widthPx) > vw - 8) {
-      left = clientX - Math.max(rect.width, this.widthPx) - offset
+    // Measure after content set
+    const pr = this.panel.getBoundingClientRect()
+    const pw = Math.max(pr.width, this.widthPx)
+    const ph = Math.max(pr.height, 80)
+
+    let left = clientX + 16
+    let top = clientY + 16
+
+    if (sourceRect && sourceRect.width > 0) {
+      const candidates: { left: number; top: number; score: number }[] = []
+
+      // Below source
+      candidates.push({
+        left: clamp(sourceRect.left, 8, vw - pw - 8),
+        top: sourceRect.bottom + gap,
+        score: 4,
+      })
+      // Above source
+      candidates.push({
+        left: clamp(sourceRect.left, 8, vw - pw - 8),
+        top: sourceRect.top - ph - gap,
+        score: 3,
+      })
+      // Right of source
+      candidates.push({
+        left: sourceRect.right + gap,
+        top: clamp(sourceRect.top, 8, vh - ph - 8),
+        score: 2,
+      })
+      // Left of source
+      candidates.push({
+        left: sourceRect.left - pw - gap,
+        top: clamp(sourceRect.top, 8, vh - ph - 8),
+        score: 1,
+      })
+
+      let best: { left: number; top: number; score: number } | null = null
+      for (const c of candidates) {
+        const fits =
+          c.left >= 8 &&
+          c.top >= 8 &&
+          c.left + pw <= vw - 8 &&
+          c.top + ph <= vh - 8
+        if (!fits) continue
+        // Prefer not overlapping source
+        const panelBox = {
+          left: c.left,
+          top: c.top,
+          right: c.left + pw,
+          bottom: c.top + ph,
+        }
+        const overlaps = !(
+          panelBox.right < sourceRect.left - 4 ||
+          panelBox.left > sourceRect.right + 4 ||
+          panelBox.bottom < sourceRect.top - 4 ||
+          panelBox.top > sourceRect.bottom + 4
+        )
+        const score = c.score + (overlaps ? -10 : 0)
+        if (!best || score > best.score) best = { ...c, score }
+      }
+
+      if (best) {
+        left = best.left
+        top = best.top
+      } else {
+        // Clamp cursor-based fallback
+        left = clamp(clientX + 16, 8, vw - pw - 8)
+        top = clamp(clientY + 16, 8, vh - ph - 8)
+        // If still overlaps source, force below viewport mid
+        if (sourceRect) {
+          top = clamp(sourceRect.bottom + gap, 8, vh - ph - 8)
+        }
+      }
+    } else {
+      left = clamp(left, 8, vw - pw - 8)
+      top = clamp(top, 8, vh - ph - 8)
     }
-    if (top + rect.height > vh - 8) top = clientY - rect.height - offset
-    left = Math.max(8, Math.min(left, vw - this.widthPx - 8))
-    top = Math.max(8, top)
+
     this.panel.style.left = `${left}px`
     this.panel.style.top = `${top}px`
   }
@@ -200,7 +335,7 @@ export class LensOverlay {
       this.ring.style.display = 'none'
       return
     }
-    const pad = 4
+    const pad = 3
     this.ring.style.display = 'block'
     this.ring.style.left = `${r.left - pad}px`
     this.ring.style.top = `${r.top - pad}px`
@@ -214,6 +349,10 @@ export class LensOverlay {
   }
 }
 
+function clamp(n: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, n))
+}
+
 const LENS_STYLES = `
   :host, * { box-sizing: border-box; }
 
@@ -221,7 +360,7 @@ const LENS_STYLES = `
     position: fixed;
     display: flex;
     overflow: hidden;
-    padding: 0.85rem 1.05rem;
+    padding: 0.9rem 1.1rem;
     border-radius: 1.35rem;
     box-shadow:
       0 8px 28px rgba(0, 0, 0, 0.14),
@@ -247,7 +386,6 @@ const LENS_STYLES = `
     z-index: 0;
     inset: 0;
     border-radius: inherit;
-    /* Stronger blur so busy/dark page content does not show through */
     backdrop-filter: blur(18px) saturate(140%);
     -webkit-backdrop-filter: blur(18px) saturate(140%);
     filter: url(#glass-distortion);
@@ -259,14 +397,13 @@ const LENS_STYLES = `
     z-index: 1;
     inset: 0;
     border-radius: inherit;
-    /* Higher opacity base so dark backgrounds cannot wash out text */
-    background: rgba(255, 255, 255, 0.88);
+    background: rgba(255, 255, 255, 0.9);
     background-image:
       linear-gradient(
         145deg,
-        rgba(255, 255, 255, 0.96) 0%,
-        rgba(255, 255, 255, 0.9) 48%,
-        rgba(245, 248, 255, 0.88) 100%
+        rgba(255, 255, 255, 0.97) 0%,
+        rgba(255, 255, 255, 0.92) 48%,
+        rgba(245, 248, 255, 0.9) 100%
       );
   }
 
@@ -287,27 +424,40 @@ const LENS_STYLES = `
     z-index: 3;
     width: 100%;
     min-width: 0;
-    transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
   }
 
   .panel {
     flex-direction: column;
-    max-height: min(400px, 56vh);
-    /* Extra solid underlay so page text never bleeds into glyphs */
-    background: rgba(255, 255, 255, 0.55);
+    max-height: min(440px, 58vh);
+    background: rgba(255, 255, 255, 0.62);
   }
 
   .panel .liquidGlass-text {
     overflow: auto;
-    max-height: min(380px, 52vh);
+    max-height: min(420px, 54vh);
   }
 
   .label {
-    font-size: 12px;
-    font-weight: 650;
-    letter-spacing: 0.04em;
-    color: rgba(0, 0, 0, 0.42);
-    margin-bottom: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: rgba(0, 0, 0, 0.4);
+    margin-bottom: 4px;
+  }
+
+  .label-zh {
+    margin-top: 2px;
+  }
+
+  .divider {
+    height: 1px;
+    margin: 10px 0;
+    background: linear-gradient(
+      90deg,
+      rgba(0, 0, 0, 0.06),
+      rgba(0, 0, 0, 0.12),
+      rgba(0, 0, 0, 0.06)
+    );
   }
 
   .body {
@@ -319,6 +469,19 @@ const LENS_STYLES = `
     font-weight: 520;
   }
 
+  .body-en {
+    font-size: 14.5px;
+    line-height: 1.5;
+    color: rgba(0, 0, 0, 0.55);
+    font-weight: 450;
+  }
+
+  .body-zh {
+    font-size: 16.5px;
+    color: rgba(0, 0, 0, 0.92);
+    font-weight: 520;
+  }
+
   .body.muted {
     color: rgba(0, 0, 0, 0.52);
     font-weight: 400;
@@ -326,29 +489,19 @@ const LENS_STYLES = `
 
   .hint {
     margin-top: 10px;
-    font-size: 12px;
-    color: rgba(0, 0, 0, 0.4);
+    font-size: 11.5px;
+    color: rgba(0, 0, 0, 0.38);
     line-height: 1.4;
   }
 
-  .ring {
-    padding: 0;
-    border-radius: 0.85rem;
-    box-shadow:
-      0 4px 16px rgba(0, 0, 0, 0.1),
-      0 0 0 0.5px rgba(255, 255, 255, 0.5);
+  /* Outline only — no frost/blur over the original English */
+  .source-outline {
+    position: fixed;
     pointer-events: none;
-  }
-
-  .ring .liquidGlass-effect {
-    backdrop-filter: blur(2px);
-    -webkit-backdrop-filter: blur(2px);
-  }
-
-  .ring-tint {
-    background: rgba(255, 255, 255, 0.12) !important;
-    background-image: none !important;
-    box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.55);
+    border-radius: 6px;
+    border: 1.5px solid rgba(0, 122, 255, 0.55);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.5);
+    background: transparent;
   }
 
   @keyframes lens-pulse {

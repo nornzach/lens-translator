@@ -243,12 +243,17 @@ function updateLens(): void {
     return
   }
 
+  // Thin outline on source only — panel placed away so English stays readable
   lens.highlight(entry.el)
+  const sourceRect = entry.el.getBoundingClientRect()
+  const sourceText = entry.text
 
   if (entry.status === 'ready' && entry.translation) {
     lens.showAt(lastMouse.x, lastMouse.y, {
       kind: 'ready',
       text: entry.translation,
+      sourceText,
+      sourceRect,
       stickyHint: lensSticky,
     })
     return
@@ -258,15 +263,17 @@ function updateLens(): void {
     lens.showAt(lastMouse.x, lastMouse.y, {
       kind: 'error',
       message: entry.error ?? '翻译失败',
+      sourceText,
+      sourceRect,
       stickyHint: lensSticky,
     })
-    // Allow one retry on demand when user re-hovers (reset to pending)
-    // Don't auto-loop: user can re-enter block after cache clear
   }
 
-  // Need translation for this single block
+  // Need translation for this single block — still show EN while waiting
   lens.showAt(lastMouse.x, lastMouse.y, {
     kind: 'pending',
+    sourceText,
+    sourceRect,
     stickyHint: lensSticky,
   })
   void translateBlockUnderPointer()

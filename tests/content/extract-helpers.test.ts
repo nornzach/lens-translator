@@ -5,6 +5,7 @@ import {
   hasTextBlockHint,
   isPhrasingOnly,
   isLeafTextContainer,
+  isUiLabelElement,
   dedupeNestedBlocks,
   PHRASING_TAGS,
   type ExtractedBlock,
@@ -43,6 +44,7 @@ function fakeEl(opts: {
     querySelector: () => null,
     querySelectorAll: () => [] as unknown as NodeListOf<Element>,
     contains: (other: Element) => other !== (el as unknown as Element) && (children as unknown as Element[]).includes(other),
+    closest: () => null,
     getBoundingClientRect: () => ({
       width: 100,
       height: 20,
@@ -138,6 +140,19 @@ describe('phrasing + hints', () => {
         }),
     })
     expect(isLeafTextContainer(div, 10)).toBe(true)
+  })
+
+  it('recognizes tab / button UI labels like POWERSHELL', () => {
+    const tab = fakeEl({
+      tag: 'button',
+      text: 'POWERSHELL',
+      role: 'tab',
+    })
+    Object.defineProperty(tab, 'children', {
+      get: () => [] as unknown as HTMLCollection,
+    })
+    expect(isUiLabelElement(tab)).toBe(true)
+    expect(isLeafTextContainer(tab, 10)).toBe(true)
   })
 })
 

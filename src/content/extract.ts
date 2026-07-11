@@ -38,7 +38,16 @@ const ROLE_SELECTORS = [
   '[role="paragraph"]',
   '[role="article"]',
   '[role="text"]',
+  '[role="tab"]',
+  '[role="menuitem"]',
+  '[role="menuitemradio"]',
+  '[role="option"]',
+  '[role="button"]',
+  '[role="link"]',
 ]
+
+/** Short UI labels (tabs, menu items) use a lower min length. */
+export const UI_LABEL_MIN_LENGTH = 2
 
 /**
  * Host surfaces that usually contain markdown / rich HTML.
@@ -145,6 +154,10 @@ export const PHRASING_TAGS = new Set([
  * Skip if *this* element is inside chrome/noise.
  * Note: do NOT put `code` here as closest() — that would skip paragraphs containing inline code.
  */
+/**
+ * Hard skip ancestors (noise chrome).
+ * Intentionally NOT including button / tablist — tabs & labeled buttons are learnable UI text.
+ */
 const SKIP_CLOSEST =
   [
     'script',
@@ -161,8 +174,7 @@ const SKIP_CLOSEST =
     'textarea',
     'input',
     'select',
-    'option',
-    'button',
+    // keep option for <select> menus only via closest select above
     'nav',
     'pre', // fenced code / preformatted — usually not continuous reading target
     '[contenteditable="true"]',
@@ -170,10 +182,7 @@ const SKIP_CLOSEST =
     '[role="navigation"]',
     '[role="banner"]',
     '[role="search"]',
-    '[role="menu"]',
-    '[role="menubar"]',
     '[role="toolbar"]',
-    '[role="tablist"]',
     '[data-lens-ignore]',
     '#lens-translator-root',
   ].join(', ')
@@ -194,7 +203,6 @@ const SKIP_SELF_TAGS = new Set([
   'input',
   'select',
   'option',
-  'button',
   'nav',
   'pre',
   'code', // bare code element (inline is still readable via parent p)
@@ -313,14 +321,58 @@ function childSemanticCount(el: Element): number {
 }
 
 /**
+ * Tab labels, menu items, plain text buttons — short UI copy that learners may want.
+ * e.g. POWERSHELL / CURL tabs on marketing pages.
+ */
+export function isUiLabelElement(el: Element): boolean {
+  const role = (el.getAttribute('role') || '').toLowerCase()
+  if (
+    role === 'tab' ||
+    role === 'menuitem' ||
+    role === 'menuitemradio' ||
+    role === 'option' ||
+    role === 'button' ||
+    role === 'link'
+  ) {
+    return true
+  }
+  const tag = el.tagName.toLowerCase()
+  if (tag === 'button' || tag === 'summary') return true
+  // Anchor used as tab/chip with short label
+  if (tag === 'a') {
+    const text = normalizeText(el.textContent ?? '')
+    if (text.length > 0 && text.length <= 48 && (isPhrasingOnly(el) || el.children.length === 0)) {
+      return true
+    }
+  }
+  // Div/span chips inside a tablist
+  if (
+    el.closest('[role="tablist"]') &&
+    (tag === 'div' || tag === 'span' || tag === 'li') &&
+    (isPhrasingOnly(el) || el.children.length === 0)
+  ) {
+    const text = normalizeText(el.textContent ?? '')
+    if (text.length > 0 && text.length <= 48) return true
+  }
+  return false
+}
+
+/**
  * Leaf-ish container: enough text, not a huge multi-block shell.
- * Used for div/span/section/article/custom elements.
+ * Used for div/span/section/article/custom elements + UI labels.
  */
 export function isLeafTextContainer(el: Element, minTextLength: number): boolean {
   const tag = el.tagName.toLowerCase()
+  const text = normalizeText(el.textContent ?? '')
+
+  // UI labels (tabs, buttons): lower length threshold
+  if (isUiLabelElement(el)) {
+    const min = Math.min(UI_LABEL_MIN_LENGTH, minTextLength)
+    return isTranslatableText(text, min) && text.length <= 80
+  }
+
   if (SKIP_SELF_TAGS.has(tag)) return false
 
-  const text = normalizeText(el.textContent ?? '')
   if (!isTranslatableText(text, minTextLength)) return false
 
   // Prefer phrasing-only leaves
@@ -345,6 +397,8 @@ export function isLeafTextContainer(el: Element, minTextLength: number): boolean
 }
 
 function shouldSkipAsNestedContainer(el: Element, minTextLength: number): boolean {
+  // UI labels are always leaves
+  if (isUiLabelElement(el)) return false
   // If this node contains multiple semantic blocks, prefer the children
   const count = childSemanticCount(el)
   if (count > 1) {
@@ -356,13 +410,21 @@ function shouldSkipAsNestedContainer(el: Element, minTextLength: number): boolea
 }
 
 function shouldSkipElement(el: Element): boolean {
-  if (el.closest(SKIP_CLOSEST)) return true
   if (el.closest('#lens-translator-root')) return true
-  const tag = el.tagName.toLowerCase()
-  if (SKIP_SELF_TAGS.has(tag)) return true
-  // Hidden by HTML attribute
   if (el.hasAttribute('hidden')) return true
   if (el.getAttribute('aria-hidden') === 'true') return true
+
+  // Learnable UI labels: only skip true noise ancestors
+  if (isUiLabelElement(el)) {
+    if (el.closest('script, style, noscript, template, textarea, input, select, svg, canvas')) {
+      return true
+    }
+    return false
+  }
+
+  if (el.closest(SKIP_CLOSEST)) return true
+  const tag = el.tagName.toLowerCase()
+  if (SKIP_SELF_TAGS.has(tag)) return true
   return false
 }
 
@@ -382,8 +444,12 @@ function collectCandidates(root: ParentNode = document): Element[] {
   // 1) Semantic HTML
   addAll(root.querySelectorAll(SEMANTIC_TAGS.join(',')))
 
-  // 2) ARIA roles
+  // 2) ARIA roles (incl. tabs / menuitems)
   addAll(root.querySelectorAll(ROLE_SELECTORS.join(',')))
+
+  // 2b) Tab strips & plain buttons / chip links (POWERSHELL, CURL, …)
+  addAll(root.querySelectorAll('button, [role="tablist"] button, [role="tablist"] a, [role="tablist"] [role="tab"]'))
+  addAll(root.querySelectorAll('[role="tablist"] > *, [role="tablist"] [role="presentation"] > *'))
 
   // 3) Inside rich hosts: also grab direct leaf-ish children (div/span)
   for (const host of root.querySelectorAll(RICH_HOST_SELECTORS.join(','))) {
@@ -445,11 +511,22 @@ export function extractVisibleBlocks(
     const isSemantic = (SEMANTIC_TAGS as readonly string[]).includes(tag)
     const role = el.getAttribute('role') || ''
     const isRoleBlock =
-      role === 'heading' || role === 'listitem' || role === 'paragraph' || role === 'text'
+      role === 'heading' ||
+      role === 'listitem' ||
+      role === 'paragraph' ||
+      role === 'text' ||
+      role === 'tab' ||
+      role === 'menuitem' ||
+      role === 'button' ||
+      role === 'link'
+    const isUi = isUiLabelElement(el)
+    const minLen = isUi ? Math.min(UI_LABEL_MIN_LENGTH, minTextLength) : minTextLength
 
-    if (isSemantic || isRoleBlock) {
+    if (isUi) {
+      if (!isLeafTextContainer(el, minTextLength)) continue
+    } else if (isSemantic || isRoleBlock) {
       const text = normalizeText(el.textContent ?? '')
-      if (!isTranslatableText(text, minTextLength)) continue
+      if (!isTranslatableText(text, minLen)) continue
       if (shouldSkipAsNestedContainer(el, minTextLength)) continue
     } else {
       // div / span / section / custom: only leaf text containers
