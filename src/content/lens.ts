@@ -221,16 +221,16 @@ const LENS_STYLES = `
     position: fixed;
     display: flex;
     overflow: hidden;
-    padding: 0.65rem 0.85rem;
+    padding: 0.85rem 1.05rem;
     border-radius: 1.35rem;
     box-shadow:
-      0 6px 6px rgba(0, 0, 0, 0.12),
-      0 0 24px rgba(0, 0, 0, 0.08),
-      0 12px 40px rgba(0, 0, 0, 0.1);
+      0 8px 28px rgba(0, 0, 0, 0.14),
+      0 2px 8px rgba(0, 0, 0, 0.08),
+      0 0 0 0.5px rgba(255, 255, 255, 0.8);
     transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-    font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
-    color: rgba(0, 0, 0, 0.88);
+    color: rgba(0, 0, 0, 0.92);
   }
 
   .liquidGlass-wrapper.is-visible {
@@ -247,8 +247,9 @@ const LENS_STYLES = `
     z-index: 0;
     inset: 0;
     border-radius: inherit;
-    backdrop-filter: blur(3px) saturate(160%);
-    -webkit-backdrop-filter: blur(3px) saturate(160%);
+    /* Stronger blur so busy/dark page content does not show through */
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
     filter: url(#glass-distortion);
     isolation: isolate;
   }
@@ -258,13 +259,14 @@ const LENS_STYLES = `
     z-index: 1;
     inset: 0;
     border-radius: inherit;
-    background: rgba(255, 255, 255, 0.32);
+    /* Higher opacity base so dark backgrounds cannot wash out text */
+    background: rgba(255, 255, 255, 0.88);
     background-image:
       linear-gradient(
         145deg,
-        rgba(255, 255, 255, 0.55) 0%,
-        rgba(255, 255, 255, 0.18) 42%,
-        rgba(200, 220, 255, 0.12) 100%
+        rgba(255, 255, 255, 0.96) 0%,
+        rgba(255, 255, 255, 0.9) 48%,
+        rgba(245, 248, 255, 0.88) 100%
       );
   }
 
@@ -274,9 +276,9 @@ const LENS_STYLES = `
     inset: 0;
     border-radius: inherit;
     box-shadow:
-      inset 2px 2px 1px 0 rgba(255, 255, 255, 0.55),
-      inset -1px -1px 1px 1px rgba(255, 255, 255, 0.35),
-      inset 0 0 0 0.5px rgba(255, 255, 255, 0.4);
+      inset 2px 2px 1px 0 rgba(255, 255, 255, 0.75),
+      inset -1px -1px 1px 1px rgba(255, 255, 255, 0.45),
+      inset 0 0 0 0.5px rgba(255, 255, 255, 0.65);
     pointer-events: none;
   }
 
@@ -290,41 +292,43 @@ const LENS_STYLES = `
 
   .panel {
     flex-direction: column;
-    max-height: min(340px, 52vh);
+    max-height: min(400px, 56vh);
+    /* Extra solid underlay so page text never bleeds into glyphs */
+    background: rgba(255, 255, 255, 0.55);
   }
 
   .panel .liquidGlass-text {
     overflow: auto;
-    max-height: min(320px, 48vh);
+    max-height: min(380px, 52vh);
   }
 
   .label {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 650;
     letter-spacing: 0.04em;
-    color: rgba(0, 0, 0, 0.45);
-    margin-bottom: 6px;
+    color: rgba(0, 0, 0, 0.42);
+    margin-bottom: 8px;
   }
 
   .body {
     white-space: pre-wrap;
     word-break: break-word;
-    font-size: 13.5px;
-    line-height: 1.5;
-    color: rgba(0, 0, 0, 0.88);
-    font-weight: 500;
+    font-size: 16.5px;
+    line-height: 1.55;
+    color: rgba(0, 0, 0, 0.92);
+    font-weight: 520;
   }
 
   .body.muted {
-    color: rgba(0, 0, 0, 0.48);
+    color: rgba(0, 0, 0, 0.52);
     font-weight: 400;
   }
 
   .hint {
-    margin-top: 8px;
-    font-size: 10.5px;
-    color: rgba(0, 0, 0, 0.38);
-    line-height: 1.35;
+    margin-top: 10px;
+    font-size: 12px;
+    color: rgba(0, 0, 0, 0.4);
+    line-height: 1.4;
   }
 
   .ring {
