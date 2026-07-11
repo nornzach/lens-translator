@@ -355,38 +355,4 @@ const LENS_STYLES = `
   .pending-anim {
     animation: lens-pulse 1.1s ease-in-out infinite;
   }
-
-  @media (prefers-color-scheme: dark) {
-    .liquidGlass-wrapper {
-      color: rgba(255, 255, 255, 0.92);
-      box-shadow:
-        0 6px 6px rgba(0, 0, 0, 0.35),
-        0 0 24px rgba(0, 0, 0, 0.25),
-        0 12px 40px rgba(0, 0, 0, 0.3);
-    }
-    .liquidGlass-tint {
-      background: rgba(30, 30, 35, 0.4);
-      background-image:
-        linear-gradient(
-          145deg,
-          rgba(255, 255, 255, 0.14) 0%,
-          rgba(255, 255, 255, 0.04) 45%,
-          rgba(120, 160, 255, 0.08) 100%
-        );
-    }
-    .liquidGlass-shine {
-      box-shadow:
-        inset 2px 2px 1px 0 rgba(255, 255, 255, 0.22),
-        inset -1px -1px 1px 1px rgba(255, 255, 255, 0.1),
-        inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
-    }
-    .label { color: rgba(255, 255, 255, 0.5); }
-    .body { color: rgba(255, 255, 255, 0.92); }
-    .body.muted { color: rgba(255, 255, 255, 0.5); }
-    .hint { color: rgba(255, 255, 255, 0.38); }
-    .ring-tint {
-      background: rgba(255, 255, 255, 0.06) !important;
-      box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.28);
-    }
-  }
 `
