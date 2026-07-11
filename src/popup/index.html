@@ -2,11 +2,42 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Lens Translator</title>
+    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <h1>Lens Translator</h1>
-    <div id="app"></div>
+    <main class="popup">
+      <header>
+        <h1>Lens Translator</h1>
+        <p class="subtitle">Hold Alt+Shift+L · 按住偷看中文</p>
+      </header>
+
+      <section class="card">
+        <div class="row">
+          <span class="label">当前站点</span>
+          <span id="hostname" class="value mono">—</span>
+        </div>
+        <label class="checkbox" id="pause-label">
+          <input id="pauseToggle" type="checkbox" disabled />
+          暂停此站
+        </label>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <span class="label">API</span>
+          <span id="apiStatus" class="value">…</span>
+        </div>
+        <div class="row">
+          <span class="label">自动预译</span>
+          <span id="autoStatus" class="value">…</span>
+        </div>
+      </section>
+
+      <button type="button" id="openOptions" class="btn primary">打开设置</button>
+      <p id="error" class="error" hidden></p>
+    </main>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

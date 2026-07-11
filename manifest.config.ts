@@ -24,6 +24,6 @@ export default defineManifest({
       run_at: 'document_idle',
     },
   ],
-  permissions: ['storage'],
+  permissions: ['storage', 'tabs'],
   host_permissions: ['http://*/*', 'https://*/*'],
 })
