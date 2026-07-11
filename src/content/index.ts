@@ -16,22 +16,52 @@ let configured = false
 let lensActive = false
 let lastMouse = { x: 0, y: 0 }
 let translating = false
+/** Signature of settings fields that affect translation; avoids rescan on width/hotkey-only edits. */
+let translateSettingsSig = ''
+let lastOpenOptionsAt = 0
+
+function translateSigOf(s: UserSettings, isConfigured: boolean): string {
+  return [
+    isConfigured,
+    s.baseURL,
+    s.model,
+    s.sourceLang,
+    s.targetLang,
+    s.autoTranslate,
+    s.minTextLength,
+    s.batchCharLimit,
+  ].join('\0')
+}
 
 async function refreshSettings(): Promise<void> {
   const res = await chrome.runtime.sendMessage({ type: 'get-settings' })
-  if (res?.type === 'settings') {
-    settings = res.settings
-    configured = Boolean(res.configured)
-    lens.setWidth(settings.lensWidthPx)
-    if (configured) {
-      registry.resetErrorsToPending()
-      void scanAndTranslate({ force: true })
-    }
+  if (res?.type !== 'settings') return
+
+  settings = res.settings
+  configured = Boolean(res.configured)
+  lens.setWidth(settings.lensWidthPx)
+
+  const sig = translateSigOf(settings, configured)
+  const changed = sig !== translateSettingsSig
+  const prev = translateSettingsSig
+  translateSettingsSig = sig
+
+  if (configured && changed) {
+    // Skip reset on first load (prev === ''); main() still scans.
+    if (prev !== '') registry.resetErrorsToPending()
+    void scanAndTranslate({ force: true })
   }
 }
 
 function disabledHere(): boolean {
   return isHostnamePaused(location.hostname, settings.pausedHostnames)
+}
+
+function maybeOpenOptions(): void {
+  const now = Date.now()
+  if (now - lastOpenOptionsAt < 5000) return
+  lastOpenOptionsAt = now
+  void chrome.runtime.sendMessage({ type: 'open-options' })
 }
 
 async function scanAndTranslate(opts?: { force?: boolean }): Promise<void> {
@@ -62,7 +92,9 @@ async function scanAndTranslate(opts?: { force?: boolean }): Promise<void> {
     for (const t of list) registry.setTranslation(t.id, t.translation)
     if (!res || res.ok === false) {
       const errMsg = !res ? 'No response from background' : res.error
-      for (const id of (!res ? pending.map((p) => p.id) : (res.failedIds ?? pending.map((p) => p.id)))) {
+      for (const id of !res
+        ? pending.map((p) => p.id)
+        : (res.failedIds ?? pending.map((p) => p.id))) {
         if (!registry.get(id)?.translation) registry.setError(id, errMsg)
       }
     }
@@ -73,7 +105,6 @@ async function scanAndTranslate(opts?: { force?: boolean }): Promise<void> {
     }
   } finally {
     translating = false
-    // Retry if work arrived while locked (new blocks upserted mid-flight).
     if (registry.pendingBlocks().length > 0) {
       void scanAndTranslate(opts)
     }
@@ -86,7 +117,6 @@ function updateLens(): void {
     lens.hide()
     return
   }
-  // Host uses pointer-events: none; still filter it out of the hit stack
   const host = lens.getHost()
   const stack = document
     .elementsFromPoint(lastMouse.x, lastMouse.y)
@@ -97,6 +127,7 @@ function updateLens(): void {
   if (!configured) {
     lens.showAt(lastMouse.x, lastMouse.y, { kind: 'unconfigured' })
     lens.highlight(null)
+    maybeOpenOptions()
     return
   }
 
@@ -133,7 +164,6 @@ function onKeyDown(e: KeyboardEvent): void {
 
 function onKeyUp(e: KeyboardEvent): void {
   if (!lensActive) return
-  // Release when any part of the chord is released
   if (
     e.code === settings.hotkey.code ||
     (settings.hotkey.altKey && e.key === 'Alt') ||

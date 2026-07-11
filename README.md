@@ -30,13 +30,15 @@ Any OpenAI-compatible Chat Completions endpoint works (same path shape: `{baseUR
 ## Usage
 
 1. Browse an English page with the extension loaded and API configured.
-2. **Hold `Alt+Shift+L`** (default; configurable in Options).
-3. Move the pointer over a text block — a rectangular lens shows the Chinese translation for that block and outlines the source.
-4. **Release** the hotkey — lens and outline vanish; the page stays English.
+2. **Hold `Option+Shift+L`** (default on Mac; Alt+Shift+L on Windows/Linux). Rebind via Options → **录制快捷键**.
+3. Move the pointer over a text block — a rectangular lens shows Chinese for that block and a ring highlight on the source.
+4. **Release** the hotkey — lens and highlight vanish; the page stays English.
+
+If API is not configured, holding the hotkey opens the Options page (throttled).
 
 Popup:
 
-- Shows the current tab hostname
+- Shows the current tab hostname and the configured hotkey hint
 - **暂停此站** — stop translating / lens on this host
 - **打开设置** — options page
 - API configured status

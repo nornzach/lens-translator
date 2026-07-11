@@ -1,7 +1,7 @@
 import { makeBlockId } from '../shared/block-id'
 import { isTranslatableText, normalizeText } from '../shared/text'
 
-const BLOCK_SELECTOR = [
+const SEMANTIC_SELECTOR = [
   'p',
   'h1',
   'h2',
@@ -19,8 +19,43 @@ const BLOCK_SELECTOR = [
   'summary',
 ].join(',')
 
+/** Inline / phrasing tags allowed inside conservative div/span text containers. */
+const PHRASING_TAGS = new Set([
+  'a',
+  'abbr',
+  'b',
+  'bdi',
+  'bdo',
+  'br',
+  'cite',
+  'code',
+  'data',
+  'dfn',
+  'em',
+  'i',
+  'kbd',
+  'mark',
+  'q',
+  'rp',
+  'rt',
+  'ruby',
+  's',
+  'samp',
+  'small',
+  'span',
+  'strong',
+  'sub',
+  'sup',
+  'time',
+  'u',
+  'var',
+  'wbr',
+  'svg',
+  'img',
+])
+
 const SKIP_CLOSEST =
-  'nav, script, style, noscript, code, pre, textarea, input, [contenteditable="true"], [aria-hidden="true"]'
+  'nav, script, style, noscript, code, pre, textarea, input, button, select, option, [contenteditable="true"], [aria-hidden="true"]'
 
 export type ExtractedBlock = {
   id: string
@@ -61,37 +96,72 @@ function isVisible(el: Element, margin: number): boolean {
   return true
 }
 
+function isPhrasingOnly(el: Element): boolean {
+  for (const child of el.children) {
+    const t = child.tagName.toLowerCase()
+    if (!PHRASING_TAGS.has(t)) return false
+    if (t !== 'br' && t !== 'img' && t !== 'svg' && !isPhrasingOnly(child)) return false
+  }
+  return true
+}
+
+/** Conservative div/span: long enough text, no semantic block descendants, phrasing-only children. */
+export function isConservativeTextContainer(el: Element, minTextLength: number): boolean {
+  const tag = el.tagName.toLowerCase()
+  if (tag !== 'div' && tag !== 'span') return false
+  if (el.querySelector(SEMANTIC_SELECTOR)) return false
+  if (!isPhrasingOnly(el)) return false
+  const text = normalizeText(el.textContent ?? '')
+  return isTranslatableText(text, minTextLength)
+}
+
+function shouldSkipAsContainer(el: Element, minTextLength: number): boolean {
+  const nested = el.querySelector(SEMANTIC_SELECTOR)
+  if (!nested || nested === el) return false
+  const text = normalizeText(el.textContent ?? '')
+  const nestedText = normalizeText(nested.textContent ?? '')
+  if (nestedText.length >= minTextLength && nestedText.length > text.length * 0.5) {
+    const childBlocks = el.querySelectorAll(SEMANTIC_SELECTOR)
+    if (childBlocks.length > 1) return true
+  }
+  return false
+}
+
 export function extractVisibleBlocks(
   minTextLength: number,
   prefetchMarginPx: number,
 ): ExtractedBlock[] {
-  const nodes = document.querySelectorAll(BLOCK_SELECTOR)
+  const semantic = document.querySelectorAll(SEMANTIC_SELECTOR)
+  const loose = document.querySelectorAll('div, span')
   const out: ExtractedBlock[] = []
   const seen = new Set<string>()
+  const seenEl = new Set<Element>()
 
-  for (const el of nodes) {
-    if (el.closest(SKIP_CLOSEST)) continue
-    if (el.closest('#lens-translator-root')) continue
-    if (!isVisible(el, prefetchMarginPx)) continue
+  const consider = (el: Element, requireConservative: boolean) => {
+    if (seenEl.has(el)) return
+    if (el.closest(SKIP_CLOSEST)) return
+    if (el.closest('#lens-translator-root')) return
+    if (!isVisible(el, prefetchMarginPx)) return
 
-    const text = normalizeText(el.textContent ?? '')
-    if (!isTranslatableText(text, minTextLength)) continue
-
-    // Prefer leaf-ish blocks: skip containers with multiple substantial nested blocks
-    const nested = el.querySelector(BLOCK_SELECTOR)
-    if (nested && nested !== el) {
-      const nestedText = normalizeText(nested.textContent ?? '')
-      if (nestedText.length >= minTextLength && nestedText.length > text.length * 0.5) {
-        const childBlocks = el.querySelectorAll(BLOCK_SELECTOR)
-        if (childBlocks.length > 1) continue
-      }
+    if (requireConservative) {
+      if (!isConservativeTextContainer(el, minTextLength)) return
+    } else {
+      const text = normalizeText(el.textContent ?? '')
+      if (!isTranslatableText(text, minTextLength)) return
+      if (shouldSkipAsContainer(el, minTextLength)) return
     }
 
+    const text = normalizeText(el.textContent ?? '')
     const tag = el.tagName.toLowerCase()
     const id = makeBlockId(tag, text, coarsePath(el))
-    if (seen.has(id)) continue
+    if (seen.has(id)) return
     seen.add(id)
+    seenEl.add(el)
     out.push({ id, el, tag, text })
   }
+
+  for (const el of semantic) consider(el, false)
+  for (const el of loose) consider(el, true)
+
   return out
 }

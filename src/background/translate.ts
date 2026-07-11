@@ -68,7 +68,12 @@ export async function translateAllBlocks(
             failedIds: blocks.map((b) => b.id),
           }
         }
-        if (result.status === 429 || (result.status && result.status >= 500)) {
+        // Retry: rate limit, server errors, and network failures (no status)
+        if (
+          result.status === 429 ||
+          (result.status !== undefined && result.status >= 500) ||
+          result.status === undefined
+        ) {
           await sleep(200 * attempt)
           continue
         }
@@ -85,6 +90,11 @@ export async function translateAllBlocks(
       const parsed = parseTranslateBatchResult(parsedJson, allowed)
       if (!parsed.ok) {
         lastError = parsed.error
+        continue
+      }
+      // Schema-shaped but empty / useless — retry instead of accepting as success
+      if (parsed.items.length === 0 && batch.length > 0) {
+        lastError = 'empty translation items'
         continue
       }
       translations.push(...parsed.items)

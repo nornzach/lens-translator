@@ -35,6 +35,15 @@ async function handle(message: ToBackground) {
     return settingsForContent(next)
   }
 
+  if (message.type === 'open-options') {
+    try {
+      await chrome.runtime.openOptionsPage()
+      return { type: 'open-options-result', ok: true }
+    } catch {
+      return { type: 'open-options-result', ok: false }
+    }
+  }
+
   if (message.type === 'translate-batch') {
     const settings = await loadSettings()
     if (!isConfigured(settings)) {

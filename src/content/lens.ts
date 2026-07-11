@@ -12,6 +12,7 @@ export class LensOverlay {
   private panel: HTMLDivElement
   private label: HTMLDivElement
   private body: HTMLDivElement
+  private ring: HTMLDivElement
   private highlightEl: Element | null = null
   private widthPx: number
 
@@ -31,10 +32,6 @@ export class LensOverlay {
     style.textContent = `
       .panel {
         position: fixed;
-        max-width: ${this.widthPx}px;
-        width: ${this.widthPx}px;
-        max-height: 240px;
-        overflow: auto;
         box-sizing: border-box;
         padding: 10px 12px;
         border-radius: 10px;
@@ -44,6 +41,8 @@ export class LensOverlay {
         font: 13px/1.45 system-ui, -apple-system, sans-serif;
         box-shadow: 0 12px 40px rgba(0,0,0,.45);
         display: none;
+        max-height: min(320px, 50vh);
+        overflow: auto;
       }
       .label {
         font-size: 10px;
@@ -53,16 +52,38 @@ export class LensOverlay {
       }
       .body { white-space: pre-wrap; word-break: break-word; }
       .muted { color: #94a3b8; }
+      .ring {
+        position: fixed;
+        box-sizing: border-box;
+        border: 2px solid #38bdf8;
+        border-radius: 4px;
+        box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.25);
+        pointer-events: none;
+        display: none;
+      }
+      @keyframes lens-pulse {
+        0%, 100% { opacity: 0.55; }
+        50% { opacity: 1; }
+      }
+      .pending-anim { animation: lens-pulse 1.1s ease-in-out infinite; }
     `
+    this.ring = document.createElement('div')
+    this.ring.className = 'ring'
     this.panel = document.createElement('div')
     this.panel.className = 'panel'
     this.label = document.createElement('div')
     this.label.className = 'label'
-    this.label.textContent = 'LENS · ZH'
+    this.label.textContent = '中文'
     this.body = document.createElement('div')
     this.body.className = 'body'
     this.panel.append(this.label, this.body)
-    this.root.append(style, this.panel)
+    this.root.append(style, this.ring, this.panel)
+    this.applyWidth()
+  }
+
+  private applyWidth(): void {
+    this.panel.style.width = `${this.widthPx}px`
+    this.panel.style.maxWidth = `${this.widthPx}px`
   }
 
   mount(): void {
@@ -76,8 +97,7 @@ export class LensOverlay {
 
   setWidth(widthPx: number): void {
     this.widthPx = widthPx
-    this.panel.style.width = `${widthPx}px`
-    this.panel.style.maxWidth = `${widthPx}px`
+    this.applyWidth()
   }
 
   showAt(
@@ -87,7 +107,7 @@ export class LensOverlay {
   ): void {
     this.mount()
     this.panel.style.display = 'block'
-    this.body.classList.remove('muted')
+    this.body.classList.remove('muted', 'pending-anim')
 
     // Only textContent for translations — never innerHTML
     switch (state.kind) {
@@ -95,7 +115,7 @@ export class LensOverlay {
         this.body.textContent = state.text
         break
       case 'pending':
-        this.body.classList.add('muted')
+        this.body.classList.add('muted', 'pending-anim')
         this.body.textContent = '翻译中…'
         break
       case 'empty':
@@ -108,10 +128,11 @@ export class LensOverlay {
         break
       case 'unconfigured':
         this.body.classList.add('muted')
-        this.body.textContent = '请先配置 API'
+        this.body.textContent = '请先配置 API（已尝试打开设置页）'
         break
     }
 
+    // Measure after content set
     const offset = 16
     const rect = this.panel.getBoundingClientRect()
     let left = clientX + offset
@@ -136,26 +157,34 @@ export class LensOverlay {
   }
 
   highlight(el: Element | null): void {
-    if (this.highlightEl === el) return
-    this.clearHighlight()
-    this.highlightEl = el
-    if (el instanceof HTMLElement) {
-      el.dataset.lensHl = '1'
-      el.style.outline = '2px solid #38bdf8'
-      el.style.outlineOffset = '2px'
+    if (this.highlightEl === el) {
+      if (el) this.positionRing(el)
+      return
     }
+    this.highlightEl = el
+    if (!el) {
+      this.ring.style.display = 'none'
+      return
+    }
+    this.positionRing(el)
+  }
+
+  private positionRing(el: Element): void {
+    const r = el.getBoundingClientRect()
+    if (r.width < 1 || r.height < 1) {
+      this.ring.style.display = 'none'
+      return
+    }
+    const pad = 2
+    this.ring.style.display = 'block'
+    this.ring.style.left = `${r.left - pad}px`
+    this.ring.style.top = `${r.top - pad}px`
+    this.ring.style.width = `${r.width + pad * 2}px`
+    this.ring.style.height = `${r.height + pad * 2}px`
   }
 
   private clearHighlight(): void {
-    if (this.highlightEl instanceof HTMLElement) {
-      elClear(this.highlightEl)
-    }
     this.highlightEl = null
+    this.ring.style.display = 'none'
   }
-}
-
-function elClear(el: HTMLElement): void {
-  el.style.outline = ''
-  el.style.outlineOffset = ''
-  delete el.dataset.lensHl
 }

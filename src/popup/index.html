@@ -10,7 +10,7 @@
     <main class="popup">
       <header>
         <h1>Lens Translator</h1>
-        <p class="subtitle">Hold Alt+Shift+L · 按住偷看中文</p>
+        <p class="subtitle" id="hotkeyHint">按住快捷键偷看中文</p>
       </header>
 
       <section class="card">
@@ -36,6 +36,7 @@
       </section>
 
       <button type="button" id="openOptions" class="btn primary">打开设置</button>
+      <p id="unconfiguredTip" class="tip" hidden>尚未配置 API，请先打开设置填写 Base URL、Key 与模型。</p>
       <p id="error" class="error" hidden></p>
     </main>
     <script type="module" src="./main.ts"></script>

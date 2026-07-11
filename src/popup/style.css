@@ -142,3 +142,10 @@ header h1 {
   color: var(--err);
   font-size: 0.8rem;
 }
+
+.tip {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--warn);
+}

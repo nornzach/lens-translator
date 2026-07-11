@@ -40,5 +40,15 @@ export type PauseHostnameMsg = {
   paused: boolean
 }
 
-export type ToBackground = TranslateBatchRequestMsg | GetSettingsMsg | PauseHostnameMsg
-export type FromBackground = TranslateBatchResultOk | TranslateBatchResultErr | SettingsMsg
+export type OpenOptionsMsg = { type: 'open-options' }
+
+export type ToBackground =
+  | TranslateBatchRequestMsg
+  | GetSettingsMsg
+  | PauseHostnameMsg
+  | OpenOptionsMsg
+export type FromBackground =
+  | TranslateBatchResultOk
+  | TranslateBatchResultErr
+  | SettingsMsg
+  | { type: 'open-options-result'; ok: boolean }

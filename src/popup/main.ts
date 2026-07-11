@@ -1,4 +1,5 @@
 import { isConfigured, loadSettings, type UserSettings } from '../shared/settings'
+import { formatHotkeyLabel } from '../shared/hotkey'
 import type { PauseHostnameMsg, SettingsMsg } from '../shared/messages'
 
 function el<T extends HTMLElement>(id: string): T {
@@ -19,8 +20,9 @@ function hostnameFromUrl(url: string | undefined): string {
 }
 
 function renderStatus(settings: UserSettings): void {
+  const configured = isConfigured(settings)
   const api = el<HTMLElement>('apiStatus')
-  if (isConfigured(settings)) {
+  if (configured) {
     api.textContent = '已配置'
     api.className = 'value status-ok'
   } else {
@@ -31,6 +33,12 @@ function renderStatus(settings: UserSettings): void {
   const auto = el<HTMLElement>('autoStatus')
   auto.textContent = settings.autoTranslate ? '开' : '关'
   auto.className = 'value'
+
+  const label = formatHotkeyLabel(settings.hotkey)
+  el<HTMLElement>('hotkeyHint').textContent = `按住 ${label} 偷看中文`
+
+  const tip = el<HTMLElement>('unconfiguredTip')
+  tip.hidden = configured
 }
 
 async function setHostnamePaused(hostname: string, paused: boolean): Promise<UserSettings> {
@@ -41,9 +49,8 @@ async function setHostnamePaused(hostname: string, paused: boolean): Promise<Use
   }
   const res = (await chrome.runtime.sendMessage(msg)) as SettingsMsg
   if (!res || res.type !== 'settings') {
-    throw new Error('Failed to update pause state')
+    throw new Error('更新暂停状态失败')
   }
-  // Message settings redact apiKey; reload from storage for accurate status.
   return loadSettings()
 }
 
