@@ -100,4 +100,39 @@ describe('chatCompletionsJson', () => {
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error).toMatch(/401/)
   })
+
+  it('rejects insecure remote endpoints before sending the API key', async () => {
+    const result = await chatCompletionsJson({
+      baseURL: 'http://api.example.com/v1',
+      apiKey: 'sk-secret',
+      model: 'm',
+      systemPrompt: 's',
+      userPrompt: 'u',
+      useJsonSchema: false,
+    })
+
+    expect(result).toEqual({ ok: false, error: '远程 Base URL 必须使用 HTTPS' })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed completion JSON at the network boundary', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: null }),
+      }),
+    )
+    const result = await chatCompletionsJson({
+      baseURL: 'https://api.example.com/v1',
+      apiKey: 'sk-x',
+      model: 'm',
+      systemPrompt: 's',
+      userPrompt: 'u',
+      useJsonSchema: false,
+    })
+
+    expect(result).toEqual({ ok: false, error: 'completion choices missing' })
+  })
 })

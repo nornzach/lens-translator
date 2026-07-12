@@ -45,15 +45,22 @@ export function parseTranslateBatchResult(
   raw: unknown,
   allowedIds: Set<string>,
 ): { ok: true; items: { id: string; translation: string }[] } | { ok: false; error: string } {
-  if (!raw || typeof raw !== 'object') return { ok: false, error: 'not an object' }
-  const items = (raw as { items?: unknown }).items
-  if (!Array.isArray(items)) return { ok: false, error: 'items missing' }
+  if (!raw || typeof raw !== 'object' || !('items' in raw)) {
+    return { ok: false, error: 'items missing' }
+  }
+  if (!Array.isArray(raw.items)) return { ok: false, error: 'items missing' }
 
   const out: { id: string; translation: string }[] = []
-  for (const row of items) {
-    if (!row || typeof row !== 'object') continue
-    const id = (row as { id?: unknown }).id
-    const translation = (row as { translation?: unknown }).translation
+  for (const row of raw.items) {
+    if (
+      !row ||
+      typeof row !== 'object' ||
+      !('id' in row) ||
+      !('translation' in row)
+    ) {
+      continue
+    }
+    const { id, translation } = row
     if (typeof id !== 'string' || typeof translation !== 'string') continue
     if (!allowedIds.has(id)) continue
     out.push({ id, translation })

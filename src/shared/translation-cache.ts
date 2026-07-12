@@ -52,19 +52,12 @@ export class TranslationCache {
     this.evict()
   }
 
-  has(key: string): boolean {
-    return this.map.has(key)
-  }
 
   clear(): void {
     this.map.clear()
     this.totalChars = 0
   }
 
-  /** Test helper */
-  keys(): string[] {
-    return [...this.map.keys()]
-  }
 
   private evict(): void {
     while (

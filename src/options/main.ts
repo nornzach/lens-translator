@@ -46,7 +46,7 @@ function writeHotkeyHidden(h: HotkeyConfig): void {
   const label = formatHotkeyLabel(h)
   el<HTMLElement>('hotkeyPreview').textContent = label
   el<HTMLElement>('helpHotkey').textContent =
-    `按住 ${label} 显示矩形透镜中文，松开即消失；页面英文不会被替换。`
+    `按住 ${label} 临时显示透镜；短按后保持打开并跟随鼠标，再次短按或按 Esc 关闭。`
 }
 
 function fillForm(s: UserSettings): void {

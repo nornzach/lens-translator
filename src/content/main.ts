@@ -1,9 +1,9 @@
 import { matchesHotkey } from '../shared/hotkey'
 import { makeBlockId } from '../shared/block-id'
 import type { UserSettings } from '../shared/settings-defaults'
-import { DEFAULT_SETTINGS, isConfigured, mergeSettings } from '../shared/settings-defaults'
-import { loadSettings } from '../shared/settings'
+import { DEFAULT_SETTINGS, mergeSettings } from '../shared/settings-defaults'
 import type {
+  SettingsMsg,
   TranslateBatchResultErr,
   TranslateBatchResultOk,
   TranslateBlock,
@@ -11,13 +11,12 @@ import type {
   TranslateImageResultOk,
 } from '../shared/messages'
 import { normalizeText } from '../shared/text'
-import { coarsePath, extractVisibleBlocks } from './extract'
+import { coarsePath, extractBlockAtElement, extractVisibleBlocks } from './extract'
 import { BlockRegistry } from './registry'
 import { LensOverlay } from './lens'
 import { BrowserTranslator } from './browser-translator'
 import { ImageRegistry, type ImageTranslationEntry } from './image-registry'
 import { makePageKey } from './page-key'
-import { isHostnamePaused } from './pause'
 
 const registry = new BlockRegistry()
 const imageRegistry = new ImageRegistry()
@@ -25,12 +24,14 @@ const browserTranslator = new BrowserTranslator()
 const lens = new LensOverlay(340)
 let settings: UserSettings = DEFAULT_SETTINGS
 let configured = false
+let pausedHere = false
 let lensActive = false
 let lensSticky = false
 let hotkeyDownAt = 0
 let lastMouse = { x: 0, y: 0 }
 let translateSettingsSig = ''
 let listenersBound = false
+let pointerFrame = 0
 
 /** In-flight block ids — avoid duplicate API calls for the same block. */
 const inflight = new Set<string>()
@@ -44,8 +45,6 @@ const TAP_STICKY_MS = 320
 function translateSigOf(s: UserSettings, isConfiguredFlag: boolean): string {
   return [
     isConfiguredFlag,
-    s.baseURL,
-    s.model,
     s.sourceLang,
     s.targetLang,
     s.autoTranslate,
@@ -65,25 +64,16 @@ function ensureMouseSeed(): void {
 }
 
 function disabledHere(): boolean {
-  return isHostnamePaused(location.hostname, settings.pausedHostnames)
+  return pausedHere
 }
 
-function pageKey(): string {
-  return makePageKey()
-}
 
-function imageEntryUnderPointer(): ImageTranslationEntry | undefined {
-  const host = lens.getHost()
-  const stack = document
-    .elementsFromPoint(lastMouse.x, lastMouse.y)
-    .filter((el) => el !== host && !host.contains(el))
-
-  const image = stack[0]
-  if (!(image instanceof HTMLImageElement)) return undefined
-  if (!image.complete || image.naturalWidth < 2 || image.naturalHeight < 2) return undefined
-  const url = image.currentSrc || image.src
+function imageEntryForHit(hit: Element | null): ImageTranslationEntry | undefined {
+  if (!(hit instanceof HTMLImageElement)) return undefined
+  if (!hit.complete || hit.naturalWidth < 2 || hit.naturalHeight < 2) return undefined
+  const url = hit.currentSrc || hit.src
   if (!url) return undefined
-  return imageRegistry.upsert(makeBlockId('img', url, coarsePath(image)), image, url)
+  return imageRegistry.upsert(makeBlockId('img', url, coarsePath(hit)), hit, url)
 }
 
 function isImageTranslationResult(
@@ -92,6 +82,45 @@ function isImageTranslationResult(
   if (!value || typeof value !== 'object' || !('type' in value) || !('ok' in value)) return false
   if (value.type !== 'translate-image-result' || typeof value.ok !== 'boolean') return false
   return value.ok ? 'translation' in value && typeof value.translation === 'string' : 'error' in value && typeof value.error === 'string'
+}
+
+function isTranslationRow(value: unknown): value is { id: string; translation: string } {
+  if (!value || typeof value !== 'object') return false
+  return (
+    'id' in value &&
+    typeof value.id === 'string' &&
+    'translation' in value &&
+    typeof value.translation === 'string'
+  )
+}
+
+function isTranslateBatchResult(
+  value: unknown,
+): value is TranslateBatchResultOk | TranslateBatchResultErr {
+  if (!value || typeof value !== 'object' || !('type' in value) || !('ok' in value)) return false
+  if (value.type !== 'translate-batch-result' || typeof value.ok !== 'boolean') return false
+  if (value.ok) {
+    return (
+      'translations' in value &&
+      Array.isArray(value.translations) &&
+      value.translations.every(isTranslationRow)
+    )
+  }
+  if (!('error' in value) || typeof value.error !== 'string') return false
+  return (
+    !('translations' in value) ||
+    value.translations === undefined ||
+    (Array.isArray(value.translations) && value.translations.every(isTranslationRow))
+  )
+}
+
+function isSettingsMessage(value: unknown): value is SettingsMsg {
+  if (!value || typeof value !== 'object') return false
+  if (!('type' in value) || value.type !== 'settings') return false
+  if (!('configured' in value) || typeof value.configured !== 'boolean') return false
+  if (!('settings' in value) || !value.settings || typeof value.settings !== 'object') return false
+  if (!('paused' in value) || typeof value.paused !== 'boolean') return false
+  return 'apiKey' in value.settings && value.settings.apiKey === ''
 }
 
 async function translateImage(entry: ImageTranslationEntry): Promise<void> {
@@ -121,8 +150,8 @@ async function translateImage(entry: ImageTranslationEntry): Promise<void> {
 }
 
 /**
- * Send blocks to background. Dedupes identical sentences client-side;
- * SW also caches by text hash so repeats never hit the API again.
+ * Translate unresolved blocks with Chrome's on-device Translator API.
+ * The browser session is sequential and no configured API endpoint is contacted.
  */
 async function translateWithBrowser(blocks: TranslateBlock[]): Promise<void> {
   if (!settings.browserTranslatorFallback || !browserTranslator.isSupported()) return
@@ -174,21 +203,18 @@ async function translateSpecific(blocks: TranslateBlock[]): Promise<void> {
   let error = configured ? '翻译失败' : 'API 未配置，Chrome 内置翻译不可用'
   try {
     if (configured) {
-      const res = (await chrome.runtime.sendMessage({
+      const response: unknown = await chrome.runtime.sendMessage({
         type: 'translate-batch',
-        pageKey: pageKey(),
+        pageKey: makePageKey(),
         blocks: todo,
-      })) as TranslateBatchResultOk | TranslateBatchResultErr
-
-      const list =
-        res && 'translations' in res && Array.isArray((res as TranslateBatchResultOk).translations)
-          ? (res as TranslateBatchResultOk).translations
-          : ((res as TranslateBatchResultErr).translations ?? [])
-
-      // setTranslation fans out to all same-text blocks in the registry
-      for (const t of list) registry.setTranslation(t.id, t.translation)
-      if (!res || res.ok === false) {
-        error = !res ? 'No response from background' : res.error
+      })
+      if (!isTranslateBatchResult(response)) {
+        error = '翻译服务未返回有效结果'
+      } else {
+        for (const item of response.translations ?? []) {
+          registry.setTranslation(item.id, item.translation)
+        }
+        if (!response.ok) error = response.error
       }
     }
 
@@ -227,67 +253,33 @@ async function scanVisibleAndTranslate(): Promise<void> {
   await translateSpecific(pending)
 }
 
-/**
- * On-demand: resolve the block under the pointer and translate only that one
- * (if not already cached in registry / SW session).
- */
-async function translateBlockUnderPointer(): Promise<void> {
-  if (
-    disabledHere() ||
-    (!configured && (!settings.browserTranslatorFallback || !browserTranslator.isSupported()))
-  ) {
-    return
-  }
 
-  // Register nearby blocks so getByElement can walk up to a text node
-  const margin = 80
-  const nearby = extractVisibleBlocks(settings.minTextLength, margin)
-  for (const b of nearby) {
-    registry.upsert({ id: b.id, el: b.el, tag: b.tag, text: b.text })
-  }
-
-  const host = lens.getHost()
-  const stack = document
-    .elementsFromPoint(lastMouse.x, lastMouse.y)
-    .filter((el) => el !== host && !host.contains(el))
-  const hit = stack[0] ?? null
-  const entry = registry.getByElement(hit)
-  if (!entry) return
-  if (entry.status === 'ready' && entry.translation) return
-  if (inflight.has(entry.id)) return
-
-  await translateSpecific([
-    { id: entry.id, tag: entry.tag, text: entry.text },
-  ])
-}
-
+/** Refresh only redacted settings; the API key never enters the content-script world. */
 async function refreshSettings(): Promise<void> {
   try {
-    const full = await loadSettings()
-    configured = isConfigured(full)
-    settings = mergeSettings({ ...full, apiKey: '' })
+    const response: unknown = await chrome.runtime.sendMessage({ type: 'get-settings' })
+    if (!isSettingsMessage(response)) throw new Error('Invalid settings response')
+
+    configured = response.configured
+    settings = mergeSettings(response.settings)
+    pausedHere = response.paused
+    if (pausedHere && lensActive) deactivateLens()
     lens.setWidth(settings.lensWidthPx)
 
     const sig = translateSigOf(settings, configured)
     const changed = sig !== translateSettingsSig
-    const prev = translateSettingsSig
+    const previousSig = translateSettingsSig
     translateSettingsSig = sig
 
     if (configured && changed) {
-      if (prev !== '') registry.resetErrorsToPending()
+      if (previousSig !== '') registry.resetErrorsToPending()
       if (settings.autoTranslate) void scanVisibleAndTranslate()
     }
-
-    console.info('[Lens Translator] settings', {
-      configured,
-      autoTranslate: settings.autoTranslate,
-      browserTranslatorFallback: settings.browserTranslatorFallback,
-      baseURL: settings.baseURL,
-      model: settings.model,
-      hasKey: Boolean(full.apiKey?.trim()),
-    })
-  } catch (err) {
-    console.warn('[Lens Translator] refreshSettings failed', err)
+  } catch (error) {
+    console.warn(
+      '[Lens Translator] settings refresh failed',
+      error instanceof Error ? error.message : String(error),
+    )
   }
 }
 
@@ -303,15 +295,7 @@ function updateLens(): void {
     .filter((el) => el !== host && !host.contains(el))
   const hit = stack[0] ?? null
 
-  // Keep registry fresh near pointer for hit-testing
-  const nearby = extractVisibleBlocks(settings.minTextLength, 80)
-  for (const b of nearby) {
-    registry.upsert({ id: b.id, el: b.el, tag: b.tag, text: b.text })
-  }
-
-  const entry = registry.getByElement(hit)
-
-  const imageEntry = imageEntryUnderPointer()
+  const imageEntry = imageEntryForHit(hit)
   if (imageEntry) {
     if (!configured) {
       lens.showAt(lastMouse.x, lastMouse.y, {
@@ -359,6 +343,12 @@ function updateLens(): void {
     return
   }
 
+  let entry = registry.getByElement(hit)
+  if (!entry) {
+    const block = extractBlockAtElement(hit, settings.minTextLength)
+    if (block) entry = registry.upsert(block)
+  }
+
   if (!entry) {
     lens.showAt(lastMouse.x, lastMouse.y, {
       kind: 'empty',
@@ -389,6 +379,7 @@ function updateLens(): void {
       sourceText,
       sourceRect,
     })
+    return
   }
 
   // Need translation for this single block — still show EN while waiting
@@ -397,7 +388,9 @@ function updateLens(): void {
     sourceText,
     sourceRect,
   })
-  void translateBlockUnderPointer()
+  if (!inflight.has(entry.id)) {
+    void translateSpecific([{ id: entry.id, tag: entry.tag, text: entry.text }])
+  }
 }
 
 
@@ -475,7 +468,11 @@ function onBlur(): void {
 function onMouseMove(e: MouseEvent): void {
   if (e.composedPath().includes(lens.getHost())) return
   lastMouse = { x: e.clientX, y: e.clientY }
-  if (lensActive) updateLens()
+  if (!lensActive || pointerFrame) return
+  pointerFrame = requestAnimationFrame(() => {
+    pointerFrame = 0
+    updateLens()
+  })
 }
 
 function debounce<T extends (...args: unknown[]) => void>(fn: T, ms: number): T {
@@ -519,14 +516,6 @@ async function main(): Promise<void> {
   ensureMouseSeed()
   await refreshSettings()
   if (settings.autoTranslate) void scanVisibleAndTranslate()
-  console.info(
-    '[Lens Translator] ready · mode=',
-    settings.autoTranslate ? 'auto-pretranslate' : 'on-demand',
-    'hotkey',
-    settings.hotkey,
-    'configured=',
-    configured,
-  )
 }
 
 void main()

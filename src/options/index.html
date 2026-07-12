@@ -11,7 +11,7 @@
       <header class="header">
         <h1>Lens Translator</h1>
         <p class="help" id="helpHotkey">
-          按住快捷键显示矩形透镜中文，松开即消失；页面英文不会被替换。
+          按住快捷键临时显示透镜；短按保持打开并跟随鼠标；页面原文不会被替换。
         </p>
       </header>
 
@@ -86,15 +86,15 @@
           </div>
           <label class="checkbox">
             <input id="autoTranslate" name="autoTranslate" type="checkbox" />
-            自动预译可见区（默认关闭：仅在透镜对准某块时才翻译该块，并缓存）
+            自动预译可见区（会在页面更新和滚动时主动发送可见文本；敏感页面请关闭）
           </label>
           <label class="checkbox">
             <input id="browserTranslatorFallback" name="browserTranslatorFallback" type="checkbox" />
             API 不可用时使用 Chrome 内置翻译兜底（需 Chrome 138+；首次使用可能下载语言包）
           </label>
           <p class="hint">
-            图片：将透镜对准页面图片可提取并翻译图中文字；需要当前 API 模型支持视觉输入。仅处理
-            JPEG、PNG、WebP、GIF，单张最多 4 MB。
+            图片：会将完整图片发送到当前配置的视觉模型，不只是图中文字。仅处理 JPEG、PNG、
+            WebP、GIF，单张最多 4 MB；敏感图片请勿使用。
           </p>
           <label>
             透镜宽度（px）

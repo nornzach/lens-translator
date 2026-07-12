@@ -26,39 +26,40 @@ type TranslatorGlobal = typeof globalThis & { Translator?: TranslatorApi }
 export class BrowserTranslator {
   private session: TranslatorSession | null = null
   private languagePair = ''
-  private preparing: Promise<boolean> | null = null
+  private operations: Promise<void> = Promise.resolve()
 
   isSupported(): boolean {
     return Boolean((globalThis as TranslatorGlobal).Translator)
   }
 
-  async prepare(sourceLanguage: string, targetLanguage: string): Promise<boolean> {
-    const api = (globalThis as TranslatorGlobal).Translator
-    const pair = `${sourceLanguage}\0${targetLanguage}`
-    if (!api || sourceLanguage === targetLanguage) return false
-    if (this.session && this.languagePair === pair) return true
-    if (this.preparing) return this.preparing
-
-    this.preparing = this.createSession(api, sourceLanguage, targetLanguage, pair)
-    try {
-      return await this.preparing
-    } finally {
-      this.preparing = null
-    }
+  /** Prepare one language pair without racing an active translation or session replacement. */
+  prepare(sourceLanguage: string, targetLanguage: string): Promise<boolean> {
+    return this.runExclusive(() => this.prepareNow(sourceLanguage, targetLanguage))
   }
 
-  async translate(
+  /** Translate on device; unsupported pairs and browser failures degrade to null for cloud fallback. */
+  translate(
     text: string,
     sourceLanguage: string,
     targetLanguage: string,
   ): Promise<string | null> {
-    if (!(await this.prepare(sourceLanguage, targetLanguage))) return null
-    try {
-      const translation = await this.session?.translate(text)
-      return translation?.trim() || null
-    } catch {
-      return null
-    }
+    return this.runExclusive(async () => {
+      if (!(await this.prepareNow(sourceLanguage, targetLanguage))) return null
+      try {
+        const translation = await this.session?.translate(text)
+        return translation?.trim() || null
+      } catch {
+        return null
+      }
+    })
+  }
+
+  private async prepareNow(sourceLanguage: string, targetLanguage: string): Promise<boolean> {
+    const api = (globalThis as TranslatorGlobal).Translator
+    const pair = `${sourceLanguage}\0${targetLanguage}`
+    if (!api || sourceLanguage === targetLanguage) return false
+    if (this.session && this.languagePair === pair) return true
+    return this.createSession(api, sourceLanguage, targetLanguage, pair)
   }
 
   private async createSession(
@@ -79,5 +80,14 @@ export class BrowserTranslator {
     } catch {
       return false
     }
+  }
+
+  private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operations.then(operation, operation)
+    this.operations = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
   }
 }

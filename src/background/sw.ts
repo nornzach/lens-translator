@@ -1,5 +1,11 @@
 import { loadSettings, saveSettings, isConfigured } from '../shared/settings'
-import type { ToBackground } from '../shared/messages'
+import type { UserSettings } from '../shared/settings'
+import type {
+  FromBackground,
+  SettingsMsg,
+  ToBackground,
+  TranslateBlock,
+} from '../shared/messages'
 import {
   filterUncachedByText,
   expandTranslationsToAllIds,
@@ -7,23 +13,119 @@ import {
   translateImage,
 } from './translate'
 
-chrome.runtime.onMessage.addListener((message: ToBackground, _sender, sendResponse) => {
-  void handle(message).then(sendResponse)
-  return true // async
+chrome.runtime.onMessage.addListener((rawMessage: unknown, sender, sendResponse) => {
+  if (sender.id !== chrome.runtime.id || !isToBackground(rawMessage)) {
+    sendResponse({ type: 'translate-batch-result', ok: false, error: 'invalid message' })
+    return false
+  }
+  void handle(rawMessage, sender).then(sendResponse)
+  return true
 })
 
-function settingsForContent(settings: Awaited<ReturnType<typeof loadSettings>>) {
+/** The only settings shape allowed to cross from the trusted background boundary. */
+function settingsForContent(settings: UserSettings, hostname = ''): SettingsMsg {
+  const {
+    sourceLang,
+    targetLang,
+    autoTranslate,
+    browserTranslatorFallback,
+    lensWidthPx,
+    minTextLength,
+    batchCharLimit,
+    prefetchMarginRatio,
+    hotkey,
+  } = settings
   return {
-    type: 'settings' as const,
-    settings: { ...settings, apiKey: '' },
+    type: 'settings',
+    settings: {
+      sourceLang,
+      targetLang,
+      autoTranslate,
+      browserTranslatorFallback,
+      lensWidthPx,
+      minTextLength,
+      batchCharLimit,
+      prefetchMarginRatio,
+      hotkey,
+      apiKey: '',
+    },
+    paused: hostname ? settings.pausedHostnames.includes(hostname) : false,
     configured: isConfigured(settings),
   }
 }
 
-async function handle(message: ToBackground) {
+function senderHostname(sender: chrome.runtime.MessageSender): string {
+  if (!sender.tab?.url) return ''
+  try {
+    const url = new URL(sender.tab.url)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.hostname : ''
+  } catch {
+    return ''
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object'
+}
+
+function isTranslateBlock(value: unknown): value is TranslateBlock {
+  if (!isRecord(value)) return false
+  return (
+    typeof value.id === 'string' &&
+    value.id.length <= 256 &&
+    typeof value.tag === 'string' &&
+    value.tag.length <= 64 &&
+    typeof value.text === 'string' &&
+    value.text.length <= 20_000
+  )
+}
+
+/** Runtime validation prevents internal pages from turning the worker into an unbounded fetch proxy. */
+function isToBackground(value: unknown): value is ToBackground {
+  if (!isRecord(value) || typeof value.type !== 'string') return false
+  if (value.type === 'get-settings' || value.type === 'open-options') return true
+  if (value.type === 'set-hostname-paused') {
+    return (
+      typeof value.hostname === 'string' &&
+      value.hostname.length > 0 &&
+      value.hostname.length <= 253 &&
+      typeof value.paused === 'boolean'
+    )
+  }
+  if (value.type === 'translate-image') {
+    return (
+      typeof value.imageUrl === 'string' &&
+      value.imageUrl.length > 0 &&
+      value.imageUrl.length <= 5_500_000
+    )
+  }
+  if (value.type === 'translate-batch') {
+    if (
+      typeof value.pageKey !== 'string' ||
+      value.pageKey.length > 4096 ||
+      !Array.isArray(value.blocks) ||
+      value.blocks.length > 500
+    ) {
+      return false
+    }
+    let totalChars = 0
+    for (const block of value.blocks) {
+      if (!isTranslateBlock(block)) return false
+      totalChars += block.text.length
+      if (totalChars > 500_000) return false
+    }
+    return true
+  }
+  return false
+}
+
+async function handle(
+  message: ToBackground,
+  sender: chrome.runtime.MessageSender,
+): Promise<FromBackground> {
   if (message.type === 'get-settings') {
     const settings = await loadSettings()
-    return settingsForContent(settings)
+    return settingsForContent(settings, senderHostname(sender))
   }
 
   if (message.type === 'set-hostname-paused') {
@@ -33,7 +135,7 @@ async function handle(message: ToBackground) {
     else set.delete(message.hostname)
     const next = { ...settings, pausedHostnames: [...set] }
     await saveSettings(next)
-    return settingsForContent(next)
+    return settingsForContent(next, message.hostname)
   }
 
   if (message.type === 'open-options') {
@@ -93,15 +195,18 @@ async function handle(message: ToBackground) {
       return { type: 'translate-batch-result', ok: true, translations }
     }
 
-    // Map failed representative ids → all ids that share their text
+    const cacheKeyById = new Map<string, string>()
+    for (const [cacheKey, ids] of textHashToIds) {
+      for (const id of ids) cacheKeyById.set(id, cacheKey)
+    }
     const failedSet = new Set<string>()
-    for (const fid of result.failedIds) {
-      const key = [...textHashToIds.entries()].find(([, ids]) => ids.includes(fid))?.[0]
-      if (key) {
-        for (const id of textHashToIds.get(key) ?? [fid]) failedSet.add(id)
-      } else {
-        failedSet.add(fid)
+    for (const failedId of result.failedIds) {
+      const cacheKey = cacheKeyById.get(failedId)
+      if (!cacheKey) {
+        failedSet.add(failedId)
+        continue
       }
+      for (const id of textHashToIds.get(cacheKey) ?? [failedId]) failedSet.add(id)
     }
     return {
       type: 'translate-batch-result',

@@ -12,11 +12,19 @@ export type RegistryEntry = {
   error?: string
 }
 
+/** Bounded page-local text state with same-sentence translation fan-out. */
 export class BlockRegistry {
   private byId = new Map<string, RegistryEntry>()
   private byEl = new WeakMap<Element, string>()
   /** normalized text → translation (page-local, identical sentences share one). */
   private byNormText = new Map<string, string>()
+  private readonly maxEntries: number
+  private readonly maxTranslations: number
+
+  constructor(maxEntries = 1500, maxTranslations = 2500) {
+    this.maxEntries = Math.max(1, maxEntries)
+    this.maxTranslations = Math.max(1, maxTranslations)
+  }
 
   upsert(
     entry: Omit<RegistryEntry, 'status' | 'translation' | 'error'> & {
@@ -24,6 +32,7 @@ export class BlockRegistry {
     },
   ): RegistryEntry {
     const existing = this.byId.get(entry.id)
+    if (!existing) this.makeRoom()
     const norm = normalizeText(entry.text)
     const textHit = this.byNormText.get(norm)
     const next: RegistryEntry = {
@@ -54,7 +63,13 @@ export class BlockRegistry {
     const e = this.byId.get(id)
     if (!e) return
     const norm = normalizeText(e.text)
+    this.byNormText.delete(norm)
     this.byNormText.set(norm, translation)
+    while (this.byNormText.size > this.maxTranslations) {
+      const oldest = this.byNormText.keys().next().value
+      if (oldest === undefined) break
+      this.byNormText.delete(oldest)
+    }
     // Apply to every block with the same normalized text
     for (const other of this.byId.values()) {
       if (normalizeText(other.text) === norm) {
@@ -108,7 +123,16 @@ export class BlockRegistry {
     }
   }
 
-  all(): RegistryEntry[] {
-    return [...this.byId.values()]
+  /** Drop detached DOM references first, then evict oldest entries to stay bounded. */
+  private makeRoom(): void {
+    if (this.byId.size < this.maxEntries) return
+    for (const [id, entry] of this.byId) {
+      if (!entry.el.isConnected) this.byId.delete(id)
+    }
+    while (this.byId.size >= this.maxEntries) {
+      const oldest = this.byId.keys().next().value
+      if (oldest === undefined) break
+      this.byId.delete(oldest)
+    }
   }
 }

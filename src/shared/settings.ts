@@ -2,9 +2,10 @@ import { mergeSettings, type UserSettings } from './settings-defaults'
 
 export const STORAGE_KEY = 'settings'
 
+/** Trusted extension pages/background only; content scripts must request redacted settings. */
 export async function loadSettings(): Promise<UserSettings> {
   const result = await chrome.storage.local.get(STORAGE_KEY)
-  return mergeSettings(result[STORAGE_KEY] as Partial<UserSettings> | undefined)
+  return mergeSettings(result[STORAGE_KEY])
 }
 
 export async function saveSettings(settings: UserSettings): Promise<void> {

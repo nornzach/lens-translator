@@ -133,16 +133,13 @@ export class LensOverlay {
     if (!this.host.isConnected) document.documentElement.appendChild(this.host)
   }
 
-  unmount(): void {
-    this.clearHighlight()
-    this.host.remove()
-  }
 
   setWidth(widthPx: number): void {
     this.widthPx = Math.max(280, widthPx)
     this.applyWidth()
   }
 
+  /** Render one state, then place the selectable panel outside the highlighted source. */
   showAt(
     clientX: number,
     clientY: number,

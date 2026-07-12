@@ -151,10 +151,6 @@ export const PHRASING_TAGS = new Set([
 ])
 
 /**
- * Skip if *this* element is inside chrome/noise.
- * Note: do NOT put `code` here as closest() — that would skip paragraphs containing inline code.
- */
-/**
  * Hard skip ancestors (noise chrome).
  * Intentionally NOT including button / tablist — tabs & labeled buttons are learnable UI text.
  */
@@ -481,8 +477,7 @@ function collectCandidates(root: ParentNode = document): Element[] {
 
   // 5) Generic leaves: div/span/section/article + custom elements (sampled via query)
   addAll(root.querySelectorAll('div, span, section, article, main'))
-  // Custom elements: any tag with a hyphen (web components)
-  // querySelectorAll('*') is heavy — limit to visible area callers already margin-filter
+  // Custom elements require a full-tree query; this path is reserved for debounced auto scans.
   for (const el of root.querySelectorAll('*')) {
     if (el.tagName.includes('-') && !seen.has(el)) {
       seen.add(el)
@@ -491,6 +486,60 @@ function collectCandidates(root: ParentNode = document): Element[] {
   }
 
   return list
+}
+
+function extractCandidate(
+  el: Element,
+  minTextLength: number,
+  prefetchMarginPx: number,
+): ExtractedBlock | undefined {
+  if (shouldSkipElement(el) || !isVisible(el, prefetchMarginPx)) return undefined
+
+  const tag = el.tagName.toLowerCase()
+  const isSemantic = (SEMANTIC_TAGS as readonly string[]).includes(tag)
+  const role = el.getAttribute('role') || ''
+  const isRoleBlock =
+    role === 'heading' ||
+    role === 'listitem' ||
+    role === 'paragraph' ||
+    role === 'text' ||
+    role === 'tab' ||
+    role === 'menuitem' ||
+    role === 'button' ||
+    role === 'link'
+  const isUi = isUiLabelElement(el)
+  const minLength = isUi ? Math.min(UI_LABEL_MIN_LENGTH, minTextLength) : minTextLength
+
+  if (isUi) {
+    if (!isLeafTextContainer(el, minTextLength)) return undefined
+  } else if (isSemantic || isRoleBlock) {
+    const text = normalizeText(el.textContent ?? '')
+    if (!isTranslatableText(text, minLength)) return undefined
+    if (shouldSkipAsNestedContainer(el, minTextLength)) return undefined
+  } else if (!isLeafTextContainer(el, minTextLength)) {
+    return undefined
+  }
+
+  const text = normalizeText(el.textContent ?? '')
+  if (!isTranslatableText(text, minLength)) return undefined
+  return { id: makeBlockId(tag, text, coarsePath(el)), el, tag, text }
+}
+
+/**
+ * Resolve only the hit element and its ancestors. Pointer tracking must never
+ * trigger the full-document candidate scan used by auto-translate.
+ */
+export function extractBlockAtElement(
+  hit: Element | null,
+  minTextLength: number,
+): ExtractedBlock | undefined {
+  let current = hit
+  while (current && current.tagName.toLowerCase() !== 'html') {
+    const block = extractCandidate(current, minTextLength, 0)
+    if (block) return block
+    current = current.parentElement
+  }
+  return undefined
 }
 
 export function extractVisibleBlocks(
@@ -504,46 +553,12 @@ export function extractVisibleBlocks(
 
   for (const el of candidates) {
     if (seenEls.has(el)) continue
-    if (shouldSkipElement(el)) continue
-    if (!isVisible(el, prefetchMarginPx)) continue
+    const block = extractCandidate(el, minTextLength, prefetchMarginPx)
+    if (!block || seenIds.has(block.id)) continue
 
-    const tag = el.tagName.toLowerCase()
-    const isSemantic = (SEMANTIC_TAGS as readonly string[]).includes(tag)
-    const role = el.getAttribute('role') || ''
-    const isRoleBlock =
-      role === 'heading' ||
-      role === 'listitem' ||
-      role === 'paragraph' ||
-      role === 'text' ||
-      role === 'tab' ||
-      role === 'menuitem' ||
-      role === 'button' ||
-      role === 'link'
-    const isUi = isUiLabelElement(el)
-    const minLen = isUi ? Math.min(UI_LABEL_MIN_LENGTH, minTextLength) : minTextLength
-
-    if (isUi) {
-      if (!isLeafTextContainer(el, minTextLength)) continue
-    } else if (isSemantic || isRoleBlock) {
-      const text = normalizeText(el.textContent ?? '')
-      if (!isTranslatableText(text, minLen)) continue
-      if (shouldSkipAsNestedContainer(el, minTextLength)) continue
-    } else {
-      // div / span / section / custom: only leaf text containers
-      if (!isLeafTextContainer(el, minTextLength)) continue
-    }
-
-    const text = normalizeText(el.textContent ?? '')
-    if (!isTranslatableText(text, minTextLength)) continue
-
-    // Prefer not registering both parent and child when child is a better unit
-    // If parent already added a child that is fully this text — skip duplicates via id
-    const id = makeBlockId(tag, text, coarsePath(el))
-    if (seenIds.has(id)) continue
-
-    seenIds.add(id)
-    seenEls.add(el)
-    out.push({ id, el, tag, text })
+    seenIds.add(block.id)
+    seenEls.add(block.el)
+    out.push(block)
   }
 
   // Drop parent blocks that fully contain a smaller registered child (same text prefix noise)

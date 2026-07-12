@@ -59,4 +59,24 @@ describe('translateImage', () => {
     ).resolves.toEqual({ ok: false, error: 'unsupported image type: image/svg+xml' })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
+
+  it('rejects declared oversized images before buffering or model upload', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(new Uint8Array([1]), {
+        headers: {
+          'content-type': 'image/png',
+          'content-length': '4000001',
+        },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      translateImage('https://images.example.test/huge.png', {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'sk-test',
+      }),
+    ).resolves.toEqual({ ok: false, error: 'image is too large (max 4 MB)' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
 })

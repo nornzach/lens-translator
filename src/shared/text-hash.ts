@@ -11,12 +11,25 @@ export function hashNormalizedText(text: string): string {
   return (h >>> 0).toString(36)
 }
 
-/** Page-scoped translation cache key: same sentence + langs on same page → one entry. */
+function hashNormalizedText64(text: string): string {
+  const payload = normalizeText(text)
+  let hash = 0xcbf29ce484222325n
+  for (let i = 0; i < payload.length; i++) {
+    hash ^= BigInt(payload.charCodeAt(i))
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n)
+  }
+  return hash.toString(36)
+}
+
+/**
+ * Page-scoped cache key. A 64-bit hash avoids retaining source text in cache
+ * keys while making accidental cross-sentence reuse negligibly likely.
+ */
 export function makeTranslationCacheKey(
   pageKey: string,
   sourceLang: string,
   targetLang: string,
   text: string,
 ): string {
-  return `${pageKey}|${sourceLang}|${targetLang}|${hashNormalizedText(text)}`
+  return `${pageKey}|${sourceLang}|${targetLang}|${hashNormalizedText64(text)}`
 }

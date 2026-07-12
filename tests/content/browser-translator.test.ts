@@ -42,4 +42,31 @@ describe('BrowserTranslator', () => {
     await expect(fallback.translate('hello', 'en', 'zh')).resolves.toBeNull()
     expect(create).not.toHaveBeenCalled()
   })
+
+  it('serializes translations across language-pair changes', async () => {
+    let releaseFirst: (() => void) | undefined
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const create = vi.fn(async (options: { sourceLanguage: string; targetLanguage: string }) => {
+      if (options.sourceLanguage === 'en') await firstGate
+      return {
+        translate: async (text: string) =>
+          `${options.sourceLanguage}-${options.targetLanguage}:${text}`,
+      }
+    })
+    testGlobal.Translator = {
+      availability: vi.fn(async () => 'available'),
+      create,
+    }
+
+    const fallback = new BrowserTranslator()
+    const english = fallback.translate('hello', 'en', 'zh')
+    const french = fallback.translate('bonjour', 'fr', 'en')
+    releaseFirst?.()
+
+    await expect(english).resolves.toBe('en-zh:hello')
+    await expect(french).resolves.toBe('fr-en:bonjour')
+    expect(create).toHaveBeenCalledTimes(2)
+  })
 })

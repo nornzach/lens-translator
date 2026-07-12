@@ -6,7 +6,7 @@ import {
   type UserSettings,
 } from '../shared/settings'
 import { formatHotkeyLabel } from '../shared/hotkey'
-import type { PauseHostnameMsg, SettingsMsg } from '../shared/messages'
+import type { PauseHostnameMsg } from '../shared/messages'
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id)
@@ -44,7 +44,7 @@ function renderStatus(settings: UserSettings): void {
     : '关：仅透镜对准的块才翻译（推荐）'
 
   const label = formatHotkeyLabel(settings.hotkey)
-  el<HTMLElement>('hotkeyHint').textContent = `按住 ${label} · 短按可固定`
+  el<HTMLElement>('hotkeyHint').textContent = `${label}：按住临时显示 · 短按保持打开`
 
   const tip = el<HTMLElement>('unconfiguredTip')
   if (configured) {
@@ -64,8 +64,8 @@ async function setHostnamePaused(hostname: string, paused: boolean): Promise<Use
     hostname,
     paused,
   }
-  const res = (await chrome.runtime.sendMessage(msg)) as SettingsMsg
-  if (!res || res.type !== 'settings') {
+  const response: unknown = await chrome.runtime.sendMessage(msg)
+  if (!response || typeof response !== 'object' || !('type' in response) || response.type !== 'settings') {
     throw new Error('更新暂停状态失败')
   }
   return loadSettings()

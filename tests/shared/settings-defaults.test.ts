@@ -4,6 +4,7 @@ import {
   mergeSettings,
   isConfigured,
   missingConfigFields,
+  apiBaseUrlError,
 } from '../../src/shared/settings-defaults'
 
 describe('DEFAULT_SETTINGS', () => {
@@ -70,5 +71,15 @@ describe('isConfigured', () => {
       }),
     ).toBe(true)
     expect(missingConfigFields(DEFAULT_SETTINGS)).toContain('API Key')
+  })
+})
+
+describe('apiBaseUrlError', () => {
+  it('requires TLS for remote endpoints and permits loopback HTTP', () => {
+    expect(apiBaseUrlError('https://api.example.com/v1')).toBeNull()
+    expect(apiBaseUrlError('http://localhost:11434/v1')).toBeNull()
+    expect(apiBaseUrlError('http://127.0.0.1:8080/v1')).toBeNull()
+    expect(apiBaseUrlError('http://api.example.com/v1')).toBe('远程 Base URL 必须使用 HTTPS')
+    expect(apiBaseUrlError('not a url')).toBe('Base URL 格式无效')
   })
 })

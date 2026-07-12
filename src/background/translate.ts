@@ -12,6 +12,7 @@ import { makeTranslationCacheKey } from '../shared/text-hash'
 import { TranslationCache } from '../shared/translation-cache'
 import { normalizeText } from '../shared/text'
 import { chatCompletionsJson } from './openai'
+import type { ChatJsonParams } from './openai'
 
 const SYSTEM = 'You are a precise translation engine. Output JSON only.'
 const IMAGE_SYSTEM = 'You are a precise image text translation engine. Output JSON only.'
@@ -37,6 +38,7 @@ export type TranslateImageResult =
   | { ok: true; translation: string }
   | { ok: false; error: string }
 
+/** Fetch and upload one complete page image to the configured multimodal endpoint. */
 export async function translateImage(
   imageUrl: string,
   settings: UserSettings,
@@ -45,7 +47,7 @@ export async function translateImage(
   if (!imageDataUrl.ok) return imageDataUrl
 
   const userPrompt = buildTranslateImagePrompt(settings.sourceLang, settings.targetLang)
-  let result = await chatCompletionsJson({
+  const request: Omit<ChatJsonParams, 'useJsonSchema'> = {
     baseURL: settings.baseURL,
     apiKey: settings.apiKey,
     model: settings.model,
@@ -55,27 +57,14 @@ export async function translateImage(
       { type: 'text', text: userPrompt },
       { type: 'image_url', image_url: { url: imageDataUrl.dataUrl } },
     ],
-    useJsonSchema: true,
     jsonSchema: IMAGE_TRANSLATION_JSON_SCHEMA,
     provider: settings.provider,
     reasoningPref: settings.reasoningPref,
-  })
+  }
+  let result = await chatCompletionsJson({ ...request, useJsonSchema: true })
 
   if (!result.ok && result.status === 400) {
-    result = await chatCompletionsJson({
-      baseURL: settings.baseURL,
-      apiKey: settings.apiKey,
-      model: settings.model,
-      systemPrompt: IMAGE_SYSTEM,
-      userPrompt,
-      userContent: [
-        { type: 'text', text: userPrompt },
-        { type: 'image_url', image_url: { url: imageDataUrl.dataUrl } },
-      ],
-      useJsonSchema: false,
-      provider: settings.provider,
-      reasoningPref: settings.reasoningPref,
-    })
+    result = await chatCompletionsJson({ ...request, useJsonSchema: false })
   }
 
   if (!result.ok) {
@@ -95,6 +84,7 @@ export async function translateImage(
   }
 }
 
+/** Read supported image bytes with a hard streaming limit before base64 encoding. */
 async function loadImageDataUrl(
   imageUrl: string,
 ): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string }> {
@@ -102,6 +92,9 @@ async function loadImageDataUrl(
     const mimeType = imageUrl.slice(5).split(/[;,]/, 1)[0].toLowerCase()
     if (!VISION_IMAGE_TYPES.has(mimeType)) {
       return { ok: false, error: `unsupported image type: ${mimeType || 'unknown'}` }
+    }
+    if (!/^data:image\/(?:jpeg|png|webp|gif);base64,/i.test(imageUrl)) {
+      return { ok: false, error: 'image data URL must use base64 encoding' }
     }
     if (imageUrl.length > Math.ceil((MAX_IMAGE_BYTES * 4) / 3)) {
       return { ok: false, error: 'image is too large (max 4 MB)' }
@@ -114,7 +107,7 @@ async function loadImageDataUrl(
 
   let response: Response
   try {
-    response = await fetch(imageUrl)
+    response = await fetch(imageUrl, { signal: AbortSignal.timeout(15_000) })
   } catch (error) {
     return {
       ok: false,
@@ -132,11 +125,35 @@ async function loadImageDataUrl(
     return { ok: false, error: 'image is too large (max 4 MB)' }
   }
 
-  const bytes = new Uint8Array(await response.arrayBuffer())
-  if (bytes.byteLength > MAX_IMAGE_BYTES) {
-    return { ok: false, error: 'image is too large (max 4 MB)' }
+  if (!response.body) return { ok: false, error: 'image response body missing' }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+  try {
+    while (true) {
+      const chunk = await reader.read()
+      if (chunk.done) break
+      totalBytes += chunk.value.byteLength
+      if (totalBytes > MAX_IMAGE_BYTES) {
+        await reader.cancel()
+        return { ok: false, error: 'image is too large (max 4 MB)' }
+      }
+      chunks.push(chunk.value)
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined)
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : 'image stream failed',
+    }
   }
 
+  const bytes = new Uint8Array(totalBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
   let binary = ''
   for (let start = 0; start < bytes.length; start += 8192) {
     binary += String.fromCharCode(...bytes.subarray(start, start + 8192))
@@ -144,6 +161,7 @@ async function loadImageDataUrl(
   return { ok: true, dataUrl: `data:${mimeType};base64,${btoa(binary)}` }
 }
 
+/** Translate batches with bounded retries and preserve partial successes. */
 export async function translateAllBlocks(
   blocks: TranslateBlock[],
   settings: UserSettings,
@@ -258,17 +276,6 @@ export function getCachedTranslation(
   return textCache.get(key)
 }
 
-export function putCachedByText(
-  pageKey: string,
-  sourceLang: string,
-  targetLang: string,
-  items: { text: string; translation: string }[],
-): void {
-  for (const it of items) {
-    const key = makeTranslationCacheKey(pageKey, sourceLang, targetLang, it.text)
-    textCache.set(key, it.translation)
-  }
-}
 
 /**
  * Resolve cache hits by **normalized text** (not DOM id).
@@ -355,42 +362,3 @@ export function _cacheStatsForTests(): { size: number; chars: number } {
   return { size: textCache.size, chars: textCache.charCount }
 }
 
-// Backward-compat names used by older tests — map id-only puts is no longer primary path
-export function putCached(
-  pageKey: string,
-  items: { id: string; translation: string; text?: string }[],
-  langs: { sourceLang: string; targetLang: string } = {
-    sourceLang: 'en',
-    targetLang: 'zh',
-  },
-): void {
-  for (const it of items) {
-    const text = it.text ?? it.id
-    putCachedByText(pageKey, langs.sourceLang, langs.targetLang, [
-      { text, translation: it.translation },
-    ])
-  }
-}
-
-export function getCached(
-  pageKey: string,
-  idOrText: string,
-  langs: { sourceLang: string; targetLang: string } = {
-    sourceLang: 'en',
-    targetLang: 'zh',
-  },
-): string | undefined {
-  return getCachedTranslation(pageKey, langs.sourceLang, langs.targetLang, idOrText)
-}
-
-export function filterUncached(
-  pageKey: string,
-  blocks: TranslateBlock[],
-  langs: { sourceLang: string; targetLang: string } = {
-    sourceLang: 'en',
-    targetLang: 'zh',
-  },
-): { cached: { id: string; translation: string }[]; missing: TranslateBlock[] } {
-  const r = filterUncachedByText(pageKey, langs.sourceLang, langs.targetLang, blocks)
-  return { cached: r.cached, missing: r.missing }
-}

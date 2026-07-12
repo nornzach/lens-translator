@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { isTranslatableText, normalizeText } from '../../src/shared/text'
 import {
   classNameOf,
@@ -7,6 +7,7 @@ import {
   isLeafTextContainer,
   isUiLabelElement,
   dedupeNestedBlocks,
+  extractBlockAtElement,
   PHRASING_TAGS,
   type ExtractedBlock,
 } from '../../src/content/extract'
@@ -71,6 +72,8 @@ function fakeEl(opts: {
 
   return el as unknown as Element
 }
+
+afterEach(() => vi.unstubAllGlobals())
 
 describe('extract policy (text layer)', () => {
   it('accepts long prose', () => {
@@ -155,6 +158,24 @@ describe('phrasing + hints', () => {
     expect(isLeafTextContainer(tab, 10)).toBe(true)
   })
 })
+
+  it('extracts the pointer target without a document-wide scan', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    })
+    const paragraph = fakeEl({
+      tag: 'p',
+      text: 'Pointer-local extraction avoids scanning the full document on every move.',
+    })
+
+    expect(extractBlockAtElement(paragraph, 10)).toMatchObject({
+      el: paragraph,
+      tag: 'p',
+      text: 'Pointer-local extraction avoids scanning the full document on every move.',
+    })
+  })
 
 describe('dedupeNestedBlocks', () => {
   it('drops parent when child covers most text', () => {

@@ -1,3 +1,5 @@
+import type { UserSettings } from './settings-defaults'
+
 export type TranslateBlock = {
   id: string
   tag: string
@@ -43,11 +45,26 @@ export type TranslateBatchResultErr = {
 }
 
 export type GetSettingsMsg = { type: 'get-settings' }
+export type ContentSettings = Pick<
+  UserSettings,
+  | 'sourceLang'
+  | 'targetLang'
+  | 'autoTranslate'
+  | 'browserTranslatorFallback'
+  | 'lensWidthPx'
+  | 'minTextLength'
+  | 'batchCharLimit'
+  | 'prefetchMarginRatio'
+  | 'hotkey'
+> & { apiKey: '' }
+
 export type SettingsMsg = {
   type: 'settings'
-  /** API key is redacted in message responses to content scripts. */
-  settings: import('./settings-defaults').UserSettings
-  /** True when baseURL + apiKey + model are all set (computed before key redaction). */
+  /** Minimal content-script settings: no endpoint, model, provider, or secret fields. */
+  settings: ContentSettings
+  /** Pause state only for the requesting tab; the full hostname list stays in background storage. */
+  paused: boolean
+  /** Computed against complete background settings before minimization. */
   configured: boolean
 }
 
