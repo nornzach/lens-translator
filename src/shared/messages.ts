@@ -10,6 +10,23 @@ export type TranslateBatchRequestMsg = {
   blocks: TranslateBlock[]
 }
 
+export type TranslateImageRequestMsg = {
+  type: 'translate-image'
+  imageUrl: string
+}
+
+export type TranslateImageResultOk = {
+  type: 'translate-image-result'
+  ok: true
+  translation: string
+}
+
+export type TranslateImageResultErr = {
+  type: 'translate-image-result'
+  ok: false
+  error: string
+}
+
 export type TranslateBatchResultOk = {
   type: 'translate-batch-result'
   ok: true
@@ -44,11 +61,14 @@ export type OpenOptionsMsg = { type: 'open-options' }
 
 export type ToBackground =
   | TranslateBatchRequestMsg
+  | TranslateImageRequestMsg
   | GetSettingsMsg
   | PauseHostnameMsg
   | OpenOptionsMsg
 export type FromBackground =
   | TranslateBatchResultOk
   | TranslateBatchResultErr
+  | TranslateImageResultOk
+  | TranslateImageResultErr
   | SettingsMsg
   | { type: 'open-options-result'; ok: boolean }

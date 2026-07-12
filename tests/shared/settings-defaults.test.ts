@@ -11,6 +11,7 @@ describe('DEFAULT_SETTINGS', () => {
     expect(DEFAULT_SETTINGS.sourceLang).toBe('en')
     expect(DEFAULT_SETTINGS.targetLang).toBe('zh')
     expect(DEFAULT_SETTINGS.autoTranslate).toBe(false)
+    expect(DEFAULT_SETTINGS.browserTranslatorFallback).toBe(true)
     expect(DEFAULT_SETTINGS.lensWidthPx).toBe(320)
     expect(DEFAULT_SETTINGS.minTextLength).toBe(10)
     expect(DEFAULT_SETTINGS.batchCharLimit).toBe(6000)
@@ -30,12 +31,21 @@ describe('mergeSettings', () => {
     const merged = mergeSettings({ apiKey: 'sk-test' })
     expect(merged.apiKey).toBe('sk-test')
     expect(merged.autoTranslate).toBe(false)
+    expect(merged.browserTranslatorFallback).toBe(true)
     expect(merged.model).toBe(DEFAULT_SETTINGS.model)
   })
 
   it('preserves pausedHostnames when provided', () => {
     const merged = mergeSettings({ pausedHostnames: ['example.com'] })
     expect(merged.pausedHostnames).toEqual(['example.com'])
+  })
+
+  it('accepts only boolean browser fallback values from storage', () => {
+    expect(mergeSettings({ browserTranslatorFallback: false }).browserTranslatorFallback).toBe(false)
+    expect(
+      mergeSettings({ browserTranslatorFallback: 'enabled' as unknown as boolean })
+        .browserTranslatorFallback,
+    ).toBe(true)
   })
 
   it('coerces non-string fields from storage', () => {

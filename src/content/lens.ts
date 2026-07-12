@@ -4,26 +4,23 @@ export type LensViewState =
       kind: 'ready'
       /** Chinese translation */
       text: string
-      /** English (or source) original for side-by-side learning */
-      sourceText: string
-      stickyHint?: boolean
+      /** English source text when the target is a text block. */
+      sourceText?: string
       sourceRect?: DOMRect
     }
   | {
       kind: 'pending'
       sourceText?: string
-      stickyHint?: boolean
       sourceRect?: DOMRect
     }
-  | { kind: 'empty'; stickyHint?: boolean }
+  | { kind: 'empty' }
   | {
       kind: 'error'
       message: string
       sourceText?: string
-      stickyHint?: boolean
       sourceRect?: DOMRect
     }
-  | { kind: 'unconfigured'; stickyHint?: boolean }
+  | { kind: 'unconfigured' }
 
 /**
  * Liquid-glass lens: bilingual EN/ZH panel placed **beside** the source
@@ -157,7 +154,6 @@ export class LensOverlay {
     this.body.classList.remove('muted', 'pending-anim')
     this.sourceBody.classList.remove('muted')
 
-    const sticky = 'stickyHint' in state ? Boolean(state.stickyHint) : false
     const sourceText =
       'sourceText' in state && state.sourceText ? state.sourceText : ''
 
@@ -207,14 +203,13 @@ export class LensOverlay {
         break
     }
 
-    this.hint.textContent = sticky
-      ? '已固定 · 再按快捷键或 Esc 关闭 · 原文不被遮挡'
-      : '按住保持 · 短按固定 · 气泡避开原文便于对照'
+    this.hint.textContent = '可直接选择文本复制'
 
     const sourceRect =
       'sourceRect' in state && state.sourceRect ? state.sourceRect : null
     this.placePanel(clientX, clientY, sourceRect)
   }
+
 
   /**
    * Place glass panel **outside** the source rect so original text stays fully readable.
@@ -430,6 +425,15 @@ const LENS_STYLES = `
     flex-direction: column;
     max-height: min(440px, 58vh);
     background: rgba(255, 255, 255, 0.62);
+  }
+  .panel {
+    pointer-events: auto;
+    user-select: text;
+  }
+
+  .panel .body,
+  .panel .hint {
+    cursor: text;
   }
 
   .panel .liquidGlass-text {

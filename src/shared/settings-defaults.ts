@@ -22,6 +22,8 @@ export type UserSettings = {
   sourceLang: string
   targetLang: string
   autoTranslate: boolean
+  /** Use Chrome's on-device Translator API after the configured API fails or is absent. */
+  browserTranslatorFallback: boolean
   lensWidthPx: number
   minTextLength: number
   batchCharLimit: number
@@ -40,6 +42,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   targetLang: 'zh',
   /** Default off: only translate the block under the lens (fast first paint). */
   autoTranslate: false,
+  browserTranslatorFallback: true,
   lensWidthPx: 320,
   minTextLength: 10,
   batchCharLimit: 6000,
@@ -77,6 +80,10 @@ export function mergeSettings(partial: Partial<UserSettings> | null | undefined)
     reasoningPref: asReasoningPref(p.reasoningPref),
     sourceLang: String(p.sourceLang ?? DEFAULT_SETTINGS.sourceLang),
     targetLang: String(p.targetLang ?? DEFAULT_SETTINGS.targetLang),
+    browserTranslatorFallback:
+      typeof p.browserTranslatorFallback === 'boolean'
+        ? p.browserTranslatorFallback
+        : DEFAULT_SETTINGS.browserTranslatorFallback,
     hotkey: { ...DEFAULT_SETTINGS.hotkey, ...(p.hotkey ?? {}) },
     pausedHostnames: Array.isArray(p.pausedHostnames)
       ? p.pausedHostnames.map(String)

@@ -61,6 +61,7 @@ function fillForm(s: UserSettings): void {
   el<HTMLInputElement>('sourceLang').value = s.sourceLang
   el<HTMLInputElement>('targetLang').value = s.targetLang
   el<HTMLInputElement>('autoTranslate').checked = s.autoTranslate
+  el<HTMLInputElement>('browserTranslatorFallback').checked = s.browserTranslatorFallback
   el<HTMLInputElement>('lensWidthPx').value = String(s.lensWidthPx)
   writeHotkeyHidden(s.hotkey)
   el<HTMLInputElement>('pausedHostnames').value = s.pausedHostnames.join(', ')
@@ -85,6 +86,7 @@ function readForm(stored: UserSettings): UserSettings {
     sourceLang: el<HTMLInputElement>('sourceLang').value.trim() || DEFAULT_SETTINGS.sourceLang,
     targetLang: el<HTMLInputElement>('targetLang').value.trim() || DEFAULT_SETTINGS.targetLang,
     autoTranslate: el<HTMLInputElement>('autoTranslate').checked,
+    browserTranslatorFallback: el<HTMLInputElement>('browserTranslatorFallback').checked,
     lensWidthPx:
       Number.isFinite(lensWidth) && lensWidth > 0
         ? Math.round(lensWidth)

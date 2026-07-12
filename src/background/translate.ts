@@ -1,6 +1,9 @@
 import { splitIntoBatches } from '../shared/batch'
 import {
+  buildTranslateImagePrompt,
   buildTranslateUserPrompt,
+  IMAGE_TRANSLATION_JSON_SCHEMA,
+  parseImageTranslationResult,
   parseTranslateBatchResult,
 } from '../shared/schema'
 import type { TranslateBlock } from '../shared/messages'
@@ -11,6 +14,9 @@ import { normalizeText } from '../shared/text'
 import { chatCompletionsJson } from './openai'
 
 const SYSTEM = 'You are a precise translation engine. Output JSON only.'
+const IMAGE_SYSTEM = 'You are a precise image text translation engine. Output JSON only.'
+const MAX_IMAGE_BYTES = 4_000_000
+const VISION_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 
 /** Global bounded cache shared across tabs/pages (keys include pageKey). */
 const textCache = new TranslationCache({
@@ -26,6 +32,117 @@ export type TranslateAllResult =
       translations: { id: string; translation: string }[]
       failedIds: string[]
     }
+
+export type TranslateImageResult =
+  | { ok: true; translation: string }
+  | { ok: false; error: string }
+
+export async function translateImage(
+  imageUrl: string,
+  settings: UserSettings,
+): Promise<TranslateImageResult> {
+  const imageDataUrl = await loadImageDataUrl(imageUrl)
+  if (!imageDataUrl.ok) return imageDataUrl
+
+  const userPrompt = buildTranslateImagePrompt(settings.sourceLang, settings.targetLang)
+  let result = await chatCompletionsJson({
+    baseURL: settings.baseURL,
+    apiKey: settings.apiKey,
+    model: settings.model,
+    systemPrompt: IMAGE_SYSTEM,
+    userPrompt,
+    userContent: [
+      { type: 'text', text: userPrompt },
+      { type: 'image_url', image_url: { url: imageDataUrl.dataUrl } },
+    ],
+    useJsonSchema: true,
+    jsonSchema: IMAGE_TRANSLATION_JSON_SCHEMA,
+    provider: settings.provider,
+    reasoningPref: settings.reasoningPref,
+  })
+
+  if (!result.ok && result.status === 400) {
+    result = await chatCompletionsJson({
+      baseURL: settings.baseURL,
+      apiKey: settings.apiKey,
+      model: settings.model,
+      systemPrompt: IMAGE_SYSTEM,
+      userPrompt,
+      userContent: [
+        { type: 'text', text: userPrompt },
+        { type: 'image_url', image_url: { url: imageDataUrl.dataUrl } },
+      ],
+      useJsonSchema: false,
+      provider: settings.provider,
+      reasoningPref: settings.reasoningPref,
+    })
+  }
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      error:
+        result.status === 400
+          ? `当前模型或服务商不支持图片输入：${result.error}`
+          : result.error,
+    }
+  }
+
+  try {
+    return parseImageTranslationResult(JSON.parse(result.content))
+  } catch {
+    return { ok: false, error: 'invalid JSON from model' }
+  }
+}
+
+async function loadImageDataUrl(
+  imageUrl: string,
+): Promise<{ ok: true; dataUrl: string } | { ok: false; error: string }> {
+  if (imageUrl.startsWith('data:')) {
+    const mimeType = imageUrl.slice(5).split(/[;,]/, 1)[0].toLowerCase()
+    if (!VISION_IMAGE_TYPES.has(mimeType)) {
+      return { ok: false, error: `unsupported image type: ${mimeType || 'unknown'}` }
+    }
+    if (imageUrl.length > Math.ceil((MAX_IMAGE_BYTES * 4) / 3)) {
+      return { ok: false, error: 'image is too large (max 4 MB)' }
+    }
+    return { ok: true, dataUrl: imageUrl }
+  }
+  if (!/^https?:\/\//i.test(imageUrl)) {
+    return { ok: false, error: 'unsupported image resource URL' }
+  }
+
+  let response: Response
+  try {
+    response = await fetch(imageUrl)
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : 'could not fetch image resource',
+    }
+  }
+  if (!response.ok) return { ok: false, error: `image fetch failed: HTTP ${response.status}` }
+
+  const mimeType = response.headers.get('content-type')?.split(';', 1)[0].toLowerCase() ?? ''
+  if (!VISION_IMAGE_TYPES.has(mimeType)) {
+    return { ok: false, error: `unsupported image type: ${mimeType || 'unknown'}` }
+  }
+  const declaredLength = Number(response.headers.get('content-length') ?? 0)
+  if (declaredLength > MAX_IMAGE_BYTES) {
+    return { ok: false, error: 'image is too large (max 4 MB)' }
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  if (bytes.byteLength > MAX_IMAGE_BYTES) {
+    return { ok: false, error: 'image is too large (max 4 MB)' }
+  }
+
+  let binary = ''
+  for (let start = 0; start < bytes.length; start += 8192) {
+    binary += String.fromCharCode(...bytes.subarray(start, start + 8192))
+  }
+  return { ok: true, dataUrl: `data:${mimeType};base64,${btoa(binary)}` }
+}
 
 export async function translateAllBlocks(
   blocks: TranslateBlock[],

@@ -88,6 +88,14 @@
             <input id="autoTranslate" name="autoTranslate" type="checkbox" />
             自动预译可见区（默认关闭：仅在透镜对准某块时才翻译该块，并缓存）
           </label>
+          <label class="checkbox">
+            <input id="browserTranslatorFallback" name="browserTranslatorFallback" type="checkbox" />
+            API 不可用时使用 Chrome 内置翻译兜底（需 Chrome 138+；首次使用可能下载语言包）
+          </label>
+          <p class="hint">
+            图片：将透镜对准页面图片可提取并翻译图中文字；需要当前 API 模型支持视觉输入。仅处理
+            JPEG、PNG、WebP、GIF，单张最多 4 MB。
+          </p>
           <label>
             透镜宽度（px）
             <input id="lensWidthPx" name="lensWidthPx" type="number" min="120" max="800" step="1" />

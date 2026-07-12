@@ -1,76 +1,114 @@
 # Lens Translator
 
-Chrome MV3 extension for English immersion reading: the page stays in English by default, and you **hold a hotkey** to peek Chinese inside a **rectangular lens** over the block under your cursor. Release the key and the lens disappears — the page text is never replaced.
+Lens Translator 是一个 Chrome Manifest V3 沉浸式翻译扩展。网页默认保持原文；启动翻译透镜后，扩展会自动框选鼠标下的文本 DOM 或图片，并在旁边显示原文和译文，不修改网页内容。
 
-## Install
+## 功能
+
+- **按需翻译**：默认只翻译透镜当前指向的文本块，减少请求与等待。
+- **常驻或临时透镜**：短按快捷键保持打开并跟随鼠标；长按则在松键时关闭。
+- **可直接复制**：鼠标移入透镜后暂停目标更新，可直接选择并复制原文或译文。
+- **多模型支持**：支持 OpenAI、DeepSeek、StepFun 以及兼容 OpenAI Chat Completions 的服务。
+- **Chrome 本地兜底**：桌面 Chrome 138+ 可使用内置 Translator API，在云端 API 未配置或失败时翻译文本。
+- **图片文字翻译**：支持视觉模型读取并翻译页面图片中的文字。
+- **缓存与去重**：相同页面、语言和文本复用翻译结果；相同图片 URL 复用图片译文。
+- **站点暂停**：可从扩展弹窗暂停当前站点。
+## 安装
 
 ```bash
 npm install
 npm run build
 ```
 
-1. Open `chrome://extensions`
-2. Enable **Developer mode**
-3. **Load unpacked** → select the `dist/` folder
+1. 打开 `chrome://extensions`。
+2. 启用右上角的**开发者模式**。
+3. 点击**加载已解压的扩展程序**，选择构建生成的 `dist/` 目录。
 
-## Configure OpenAI-compatible API
+## 配置
 
-Open the extension **Options** page (popup → **打开设置**, or right-click the icon → Options).
+从扩展弹窗点击**打开设置**，或右键扩展图标后打开 Options。
 
-Set:
+### 云端 API
 
-| Field    | Example                          |
-|----------|----------------------------------|
-| Base URL | `https://api.openai.com/v1`      |
-| API Key  | your key                         |
-| Model    | `gpt-4o-mini` (or any compatible model) |
+| 配置项 | 示例 |
+|---|---|
+| 服务商 | 自动识别 / OpenAI / DeepSeek / StepFun |
+| Base URL | `https://api.openai.com/v1` |
+| API Key | 你的密钥 |
+| 模型 | `gpt-4o-mini` 或其他兼容模型 |
+| 源语言 | `en` |
+| 目标语言 | `zh` |
 
-Any OpenAI-compatible Chat Completions endpoint works (same path shape: `{baseURL}/chat/completions`). Source/target languages default to `en` → `zh`. Turn **Auto-translate** on to pretranslate visible blocks so the lens is ready when you need it.
+服务端需兼容 `{baseURL}/chat/completions`。翻译任务默认关闭或降低模型推理强度，以缩短响应时间。
 
-## Usage
+### Chrome 内置翻译兜底
 
-1. Browse an English page with the extension loaded and API configured.
-2. Open a normal **http/https** page and **refresh** after installing/configuring.
-3. **Hold `Option+Shift+L`** (Mac; Alt+Shift+L on Windows/Linux), or **short-press** to pin the lens. Rebind via Options → **录制快捷键**.
-4. Move the pointer over a paragraph — **only that block** is translated (default). Results are cached (memory + session); revisiting the same block does not re-call the API.
-5. Optional: popup toggle **自动预译可见区** to batch-translate the viewport on load/scroll (slower first paint).
-6. Release (hold mode) / press hotkey again or **Esc** (sticky mode) to hide.
+设置项**API 不可用时使用 Chrome 内置翻译兜底**默认开启。桌面 Chrome 138+ 支持内置 Translator API；首次使用某个语言对时可能需要下载语言包。该能力仅支持文本翻译，不支持图片 OCR 或视觉理解。
 
-If nothing happens: check the page console for `[Lens Translator] ready`, and ensure you are not on `chrome://` pages.
+### 图片翻译
 
-Popup:
+图片翻译需要当前云端模型支持 OpenAI-compatible `image_url` 多模态输入。扩展支持 JPEG、PNG、WebP、GIF，单张图片最大 4 MB；不支持 SVG 和 `blob:` URL。
 
-- Shows the current tab hostname and the configured hotkey hint
-- **暂停此站** — stop translating / lens on this host
-- **打开设置** — options page
-- API configured status
+## 使用
 
-## Privacy
+默认快捷键为 macOS 的 `Option+Shift+L`，Windows/Linux 的 `Alt+Shift+L`，可在设置页重新录制。
 
-- API key is stored in `chrome.storage.local`. The **background service worker** reads it for API calls; **content scripts never receive the raw key** via `get-settings` messages (it is redacted; a `configured` flag is sent instead). The options page reads storage locally for the settings form.
-- Translation traffic goes only to the **user-configured** `baseURL` endpoint.
-- Page text is sent to that endpoint solely for batch translation; nothing else is uploaded to third-party analytics by this extension.
+### 常驻模式
 
-MVP host permissions are broad (`http://*/*`, `https://*/*`) so auto-pretranslate works on ordinary sites without per-site permission prompts. Narrower optional permissions can be a later hardening step.
+1. 短按一次快捷键，透镜保持打开。
+2. 移动鼠标，透镜会跟随并自动框选鼠标下的文本 DOM 或图片。
+3. 鼠标移入透镜，目标更新暂停；此时可选择原文或译文并复制。
+4. 再次短按快捷键或按 `Esc` 关闭。
 
-## Development
+### 临时模式
+
+1. 按住快捷键，移动鼠标选择内容。
+2. 松开快捷键，透镜关闭。
+
+### 自动预译
+
+弹窗中的**自动预译可见区**会批量预译当前视口和预取范围中的文本，换取更快的透镜显示。图片不会自动预译，只有直接指向图片时才会请求视觉模型。
+
+### 弹窗功能
+
+- 显示当前站点和快捷键。
+- 暂停或恢复当前站点。
+- 开关自动预译。
+- 打开完整设置页。
+
+无法使用时，请确认当前页面是普通 `http/https` 页面，并在安装或修改配置后刷新页面。Chrome 不允许扩展内容脚本运行在 `chrome://` 页面。
+
+## 隐私与网络
+
+- API Key 保存在 `chrome.storage.local`。只有后台 Service Worker 读取密钥；发送给内容脚本的设置会移除密钥。
+- 文本只会发送到用户配置的 `baseURL`。使用 Chrome 内置兜底时，文本由 Chrome 的设备侧 Translator API 处理。
+- 图片翻译会由后台读取匹配的页面图片，转换成 `data:` URL，然后发送到用户配置的多模态接口。
+- 不支持的图片类型、`blob:` URL 和超过 4 MB 的图片会在本地拒绝。
+- 扩展不包含第三方分析或遥测。
+- `http://*/*` 和 `https://*/*` 主机权限用于在普通网页中读取可见内容和图片资源。
+
+## 开发
 
 ```bash
 npm install
-npm run dev      # Vite + CRX HMR
-npm run build    # typecheck + production build → dist/
-npm test         # Vitest unit tests
+npm run dev        # Vite 开发模式
+npm run build      # TypeScript 检查 + 生产构建，输出到 dist/
+npm test           # 运行 Vitest 测试
 npm run test:watch
 ```
 
-Load unpacked from `dist/` (or the CRX dev output) after build.
+生产构建后，在 Chrome 扩展管理页加载 `dist/`。
 
-## Manual QA checklist
+## 手工验收清单
 
-- [ ] Options save persists after reload
-- [ ] Wrong API key shows error in lens (not blank forever)
-- [ ] English article: visible paragraphs pretranslate; hold lens shows Chinese for hovered block
-- [ ] Release hotkey: lens and outline gone; page text still English
-- [ ] Scroll: new paragraphs eventually translate
-- [ ] Pause site: no requests / lens respects pause
-- [ ] Unconfigured: lens says 请先配置 API
+- [ ] 设置保存后刷新页面仍然生效。
+- [ ] 短按快捷键后透镜保持打开，并继续跟随鼠标。
+- [ ] 再次短按快捷键或按 `Esc` 能关闭常驻透镜。
+- [ ] 长按快捷键期间透镜跟随鼠标，松开后关闭。
+- [ ] 文本 DOM 被正确框选，透镜显示原文和译文。
+- [ ] 鼠标进入透镜后可以选择和复制文字。
+- [ ] 错误 API Key 会显示错误，而不是永久停留在加载状态。
+- [ ] 未配置云端 API 时，桌面 Chrome 138+ 可通过内置 Translator API 翻译受支持语言对。
+- [ ] 多模态模型能翻译 JPEG、PNG、WebP、GIF 中的可读文字。
+- [ ] 相同文本和图片资源不会重复请求。
+- [ ] SVG、`blob:` 图片或超过 4 MB 的图片显示明确错误。
+- [ ] 暂停当前站点后不再显示透镜或发起翻译请求。

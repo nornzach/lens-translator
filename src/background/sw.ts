@@ -4,6 +4,7 @@ import {
   filterUncachedByText,
   expandTranslationsToAllIds,
   translateAllBlocks,
+  translateImage,
 } from './translate'
 
 chrome.runtime.onMessage.addListener((message: ToBackground, _sender, sendResponse) => {
@@ -42,6 +43,17 @@ async function handle(message: ToBackground) {
     } catch {
       return { type: 'open-options-result', ok: false }
     }
+  }
+
+  if (message.type === 'translate-image') {
+    const settings = await loadSettings()
+    if (!isConfigured(settings)) {
+      return { type: 'translate-image-result', ok: false, error: 'API not configured' }
+    }
+    const result = await translateImage(message.imageUrl, settings)
+    return result.ok
+      ? { type: 'translate-image-result', ok: true, translation: result.translation }
+      : { type: 'translate-image-result', ok: false, error: result.error }
   }
 
   if (message.type === 'translate-batch') {

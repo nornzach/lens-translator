@@ -6,13 +6,24 @@ import {
   type ReasoningPref,
 } from '../shared/providers'
 
+export type ChatUserContent =
+  | string
+  | (
+      | { type: 'text'; text: string }
+      | { type: 'image_url'; image_url: { url: string } }
+    )[]
+
 export type ChatJsonParams = {
   baseURL: string
   apiKey: string
   model: string
   systemPrompt: string
   userPrompt: string
+  /** Optional multimodal user content; defaults to userPrompt. */
+  userContent?: ChatUserContent
   useJsonSchema: boolean
+  /** Optional schema override for single-image translation responses. */
+  jsonSchema?: Readonly<Record<string, unknown>>
   /** auto / openai / deepseek / stepfun */
   provider?: ProviderId
   /** off = disable or lowest reasoning (default) */
@@ -38,7 +49,7 @@ export async function chatCompletionsJson(params: ChatJsonParams): Promise<ChatJ
     temperature: 0.2,
     messages: [
       { role: 'system', content: params.systemPrompt },
-      { role: 'user', content: params.userPrompt },
+      { role: 'user', content: params.userContent ?? params.userPrompt },
     ],
   }
 
@@ -48,7 +59,7 @@ export async function chatCompletionsJson(params: ChatJsonParams): Promise<ChatJ
   if (params.useJsonSchema) {
     body.response_format = {
       type: 'json_schema',
-      json_schema: TRANSLATE_BATCH_JSON_SCHEMA,
+      json_schema: params.jsonSchema ?? TRANSLATE_BATCH_JSON_SCHEMA,
     }
   } else {
     body.response_format = { type: 'json_object' }
