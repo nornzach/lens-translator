@@ -40,6 +40,7 @@ export class LensOverlay {
   private ring: HTMLDivElement
   private highlightEl: Element | null = null
   private widthPx: number
+  private lastSourceKey = ''
 
   constructor(widthPx = 340) {
     this.widthPx = widthPx
@@ -204,7 +205,16 @@ export class LensOverlay {
 
     const sourceRect =
       'sourceRect' in state && state.sourceRect ? state.sourceRect : null
-    this.placePanel(clientX, clientY, sourceRect)
+    if (sourceRect) {
+      const nextKey = `${Math.round(sourceRect.left)}|${Math.round(sourceRect.top)}|${Math.round(sourceRect.right)}|${Math.round(sourceRect.bottom)}`
+      if (nextKey !== this.lastSourceKey) {
+        this.lastSourceKey = nextKey
+        this.placePanel(clientX, clientY, sourceRect)
+      }
+    } else {
+      this.lastSourceKey = ''
+      this.placePanel(clientX, clientY, null)
+    }
   }
 
 
@@ -301,6 +311,7 @@ export class LensOverlay {
   hide(): void {
     this.panel.style.display = 'none'
     this.panel.classList.remove('is-visible')
+    this.lastSourceKey = ''
     this.clearHighlight()
   }
 
