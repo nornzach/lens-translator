@@ -18,6 +18,10 @@ export function matchesHotkey(e: KeyLike, hotkey: HotkeyConfig): boolean {
   )
 }
 
+export function hotkeysEqual(a: HotkeyConfig, b: HotkeyConfig): boolean {
+  return matchesHotkey(a, b)
+}
+
 /** Human-readable label; uses Option (not Alt) for mac-friendly UX. */
 export function formatHotkeyLabel(hotkey: HotkeyConfig): string {
   const parts: string[] = []

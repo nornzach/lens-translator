@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { normalizeText, isTranslatableText } from '../../src/shared/text'
+import {
+  normalizeText,
+  isPageTranslatableText,
+  isTranslatableText,
+} from '../../src/shared/text'
 
 describe('normalizeText', () => {
   it('collapses whitespace', () => {
@@ -17,5 +21,23 @@ describe('isTranslatableText', () => {
   })
   it('accepts normal sentences', () => {
     expect(isTranslatableText('Modern tools make immersion easier.', 10)).toBe(true)
+  })
+})
+
+describe('isPageTranslatableText', () => {
+  it('rejects standalone URLs and email addresses', () => {
+    expect(isPageTranslatableText('https://example.com/docs/start', 5)).toBe(false)
+    expect(isPageTranslatableText('docs.example.com/start', 5)).toBe(false)
+    expect(isPageTranslatableText('hello@example.com', 5)).toBe(false)
+  })
+
+  it('rejects standalone handles and hashtags', () => {
+    expect(isPageTranslatableText('@openai', 2)).toBe(false)
+    expect(isPageTranslatableText('#AI #MachineLearning', 2)).toBe(false)
+  })
+
+  it('keeps prose that contains a link or hashtag', () => {
+    expect(isPageTranslatableText('Read the full guide at https://example.com/docs.', 5)).toBe(true)
+    expect(isPageTranslatableText('This is a longer post about #MachineLearning.', 5)).toBe(true)
   })
 })

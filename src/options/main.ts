@@ -5,9 +5,10 @@ import {
   isConfigured,
   missingConfigFields,
   type HotkeyConfig,
+  type TranslationEngine,
   type UserSettings,
 } from '../shared/settings'
-import { formatHotkeyLabel, hotkeyFromKeyboardEvent } from '../shared/hotkey'
+import { formatHotkeyLabel, hotkeyFromKeyboardEvent, hotkeysEqual } from '../shared/hotkey'
 import {
   PROVIDER_PRESETS,
   type ProviderId,
@@ -27,26 +28,36 @@ function parsePausedHostnames(raw: string): string[] {
     .filter(Boolean)
 }
 
-function readHotkeyFromHidden(): HotkeyConfig {
+function hotkeyFieldId(prefix: string, field: string): string {
+  return `${prefix}${field}`
+}
+
+function readHotkeyFromHidden(prefix: string, fallback: HotkeyConfig): HotkeyConfig {
   return {
-    altKey: el<HTMLInputElement>('hotkeyAlt').value === '1',
-    shiftKey: el<HTMLInputElement>('hotkeyShift').value === '1',
-    ctrlKey: el<HTMLInputElement>('hotkeyCtrl').value === '1',
-    metaKey: el<HTMLInputElement>('hotkeyMeta').value === '1',
-    code: el<HTMLInputElement>('hotkeyCode').value || DEFAULT_SETTINGS.hotkey.code,
+    altKey: el<HTMLInputElement>(hotkeyFieldId(prefix, 'Alt')).value === '1',
+    shiftKey: el<HTMLInputElement>(hotkeyFieldId(prefix, 'Shift')).value === '1',
+    ctrlKey: el<HTMLInputElement>(hotkeyFieldId(prefix, 'Ctrl')).value === '1',
+    metaKey: el<HTMLInputElement>(hotkeyFieldId(prefix, 'Meta')).value === '1',
+    code: el<HTMLInputElement>(hotkeyFieldId(prefix, 'Code')).value || fallback.code,
   }
 }
 
-function writeHotkeyHidden(h: HotkeyConfig): void {
-  el<HTMLInputElement>('hotkeyAlt').value = h.altKey ? '1' : '0'
-  el<HTMLInputElement>('hotkeyShift').value = h.shiftKey ? '1' : '0'
-  el<HTMLInputElement>('hotkeyCtrl').value = h.ctrlKey ? '1' : '0'
-  el<HTMLInputElement>('hotkeyMeta').value = h.metaKey ? '1' : '0'
-  el<HTMLInputElement>('hotkeyCode').value = h.code
-  const label = formatHotkeyLabel(h)
-  el<HTMLElement>('hotkeyPreview').textContent = label
+function writeHotkeyHidden(prefix: string, h: HotkeyConfig): void {
+  el<HTMLInputElement>(hotkeyFieldId(prefix, 'Alt')).value = h.altKey ? '1' : '0'
+  el<HTMLInputElement>(hotkeyFieldId(prefix, 'Shift')).value = h.shiftKey ? '1' : '0'
+  el<HTMLInputElement>(hotkeyFieldId(prefix, 'Ctrl')).value = h.ctrlKey ? '1' : '0'
+  el<HTMLInputElement>(hotkeyFieldId(prefix, 'Meta')).value = h.metaKey ? '1' : '0'
+  el<HTMLInputElement>(hotkeyFieldId(prefix, 'Code')).value = h.code
+  el<HTMLElement>(hotkeyFieldId(prefix, 'Preview')).textContent = formatHotkeyLabel(h)
+}
+
+function updateHotkeyHelp(): void {
+  const lensLabel = formatHotkeyLabel(readHotkeyFromHidden('hotkey', DEFAULT_SETTINGS.hotkey))
+  const pageLabel = formatHotkeyLabel(
+    readHotkeyFromHidden('pageHotkey', DEFAULT_SETTINGS.pageTranslationHotkey),
+  )
   el<HTMLElement>('helpHotkey').textContent =
-    `按住 ${label} 临时显示透镜；短按后保持打开并跟随鼠标，再次短按或按 Esc 关闭。`
+    `按住 ${lensLabel} 临时显示透镜；短按保持打开。${pageLabel} 切换整页双语翻译。`
 }
 
 function fillForm(s: UserSettings): void {
@@ -61,12 +72,29 @@ function fillForm(s: UserSettings): void {
   el<HTMLInputElement>('sourceLang').value = s.sourceLang
   el<HTMLInputElement>('targetLang').value = s.targetLang
   el<HTMLInputElement>('autoTranslate').checked = s.autoTranslate
-  el<HTMLInputElement>('browserTranslatorFallback').checked = s.browserTranslatorFallback
+  el<HTMLSelectElement>('translationEngine').value = s.translationEngine
+  el<HTMLSelectElement>('pageTranslationEngine').value = s.pageTranslationEngine
+  el<HTMLInputElement>('pageTranslationFontSizePx').value = String(
+    s.pageTranslationFontSizePx,
+  )
+  el<HTMLInputElement>('pageTranslationUseCustomColor').checked =
+    s.pageTranslationUseCustomColor
+  el<HTMLInputElement>('pageTranslationTextColor').value = s.pageTranslationTextColor
+  el<HTMLInputElement>('pageTranslationUseBackground').checked =
+    s.pageTranslationUseBackground
+  el<HTMLInputElement>('pageTranslationBackgroundColor').value =
+    s.pageTranslationBackgroundColor
+  el<HTMLInputElement>('pageTranslationBold').checked = s.pageTranslationBold
+  el<HTMLInputElement>('pageTranslationItalic').checked = s.pageTranslationItalic
+  el<HTMLInputElement>('pageTranslationUnderline').checked = s.pageTranslationUnderline
   el<HTMLInputElement>('lensWidthPx').value = String(s.lensWidthPx)
-  writeHotkeyHidden(s.hotkey)
+  writeHotkeyHidden('hotkey', s.hotkey)
+  writeHotkeyHidden('pageHotkey', s.pageTranslationHotkey)
+  updateHotkeyHelp()
   el<HTMLInputElement>('pausedHostnames').value = s.pausedHostnames.join(', ')
   updateConfigBadge(s)
   updateProviderHint(s.provider)
+  updateStyleControlStates()
 }
 
 function readForm(stored: UserSettings): UserSettings {
@@ -86,12 +114,28 @@ function readForm(stored: UserSettings): UserSettings {
     sourceLang: el<HTMLInputElement>('sourceLang').value.trim() || DEFAULT_SETTINGS.sourceLang,
     targetLang: el<HTMLInputElement>('targetLang').value.trim() || DEFAULT_SETTINGS.targetLang,
     autoTranslate: el<HTMLInputElement>('autoTranslate').checked,
-    browserTranslatorFallback: el<HTMLInputElement>('browserTranslatorFallback').checked,
+    translationEngine: el<HTMLSelectElement>('translationEngine').value as TranslationEngine,
+    pageTranslationEngine: el<HTMLSelectElement>('pageTranslationEngine')
+      .value as TranslationEngine,
+    pageTranslationFontSizePx: Number(
+      el<HTMLInputElement>('pageTranslationFontSizePx').value,
+    ),
+    pageTranslationUseCustomColor: el<HTMLInputElement>('pageTranslationUseCustomColor').checked,
+    pageTranslationTextColor: el<HTMLInputElement>('pageTranslationTextColor').value,
+    pageTranslationUseBackground: el<HTMLInputElement>('pageTranslationUseBackground').checked,
+    pageTranslationBackgroundColor: el<HTMLInputElement>('pageTranslationBackgroundColor').value,
+    pageTranslationBold: el<HTMLInputElement>('pageTranslationBold').checked,
+    pageTranslationItalic: el<HTMLInputElement>('pageTranslationItalic').checked,
+    pageTranslationUnderline: el<HTMLInputElement>('pageTranslationUnderline').checked,
     lensWidthPx:
       Number.isFinite(lensWidth) && lensWidth > 0
         ? Math.round(lensWidth)
         : DEFAULT_SETTINGS.lensWidthPx,
-    hotkey: readHotkeyFromHidden(),
+    hotkey: readHotkeyFromHidden('hotkey', DEFAULT_SETTINGS.hotkey),
+    pageTranslationHotkey: readHotkeyFromHidden(
+      'pageHotkey',
+      DEFAULT_SETTINGS.pageTranslationHotkey,
+    ),
     pausedHostnames: parsePausedHostnames(el<HTMLInputElement>('pausedHostnames').value),
   }
 }
@@ -130,6 +174,13 @@ function updateProviderHint(provider: string): void {
   }
 }
 
+function updateStyleControlStates(): void {
+  el<HTMLInputElement>('pageTranslationTextColor').disabled =
+    !el<HTMLInputElement>('pageTranslationUseCustomColor').checked
+  el<HTMLInputElement>('pageTranslationBackgroundColor').disabled =
+    !el<HTMLInputElement>('pageTranslationUseBackground').checked
+}
+
 function applyProviderPreset(id: string): void {
   const preset = PROVIDER_PRESETS.find((p) => p.id === id)
   if (!preset) return
@@ -144,9 +195,9 @@ function applyProviderPreset(id: string): void {
   }
 }
 
-function setupHotkeyCapture(): void {
-  const btn = el<HTMLButtonElement>('captureHotkey')
-  const hint = el<HTMLElement>('captureHint')
+function setupHotkeyCapture(prefix: string, buttonId: string, hintId: string): void {
+  const btn = el<HTMLButtonElement>(buttonId)
+  const hint = el<HTMLElement>(hintId)
   let capturing = false
 
   const onKey = (e: KeyboardEvent) => {
@@ -160,7 +211,8 @@ function setupHotkeyCapture(): void {
     }
     const hk = hotkeyFromKeyboardEvent(e)
     if (!hk) return
-    writeHotkeyHidden(hk)
+    writeHotkeyHidden(prefix, hk)
+    updateHotkeyHelp()
     stopCapture()
     setStatus(`已录制：${formatHotkeyLabel(hk)}（记得点保存）`)
   }
@@ -190,7 +242,16 @@ function setupHotkeyCapture(): void {
 async function init(): Promise<void> {
   let stored = await loadSettings()
   fillForm(stored)
-  setupHotkeyCapture()
+  setupHotkeyCapture('hotkey', 'captureHotkey', 'captureHint')
+  setupHotkeyCapture('pageHotkey', 'capturePageHotkey', 'capturePageHint')
+  el<HTMLInputElement>('pageTranslationUseCustomColor').addEventListener(
+    'change',
+    updateStyleControlStates,
+  )
+  el<HTMLInputElement>('pageTranslationUseBackground').addEventListener(
+    'change',
+    updateStyleControlStates,
+  )
 
   el<HTMLSelectElement>('provider').addEventListener('change', () => {
     const v = el<HTMLSelectElement>('provider').value
@@ -202,7 +263,13 @@ async function init(): Promise<void> {
     e.preventDefault()
     try {
       const next = readForm(stored)
-      const missing = missingConfigFields(next)
+      if (hotkeysEqual(next.hotkey, next.pageTranslationHotkey)) {
+        setStatus('翻译透镜与整页翻译不能使用同一个快捷键', false)
+        return
+      }
+      const usesExternal =
+        next.translationEngine === 'external' || next.pageTranslationEngine === 'external'
+      const missing = usesExternal ? missingConfigFields(next) : []
       if (missing.length) {
         await saveSettings(next)
         stored = await loadSettings()
@@ -213,7 +280,12 @@ async function init(): Promise<void> {
       await saveSettings(next)
       stored = await loadSettings()
       fillForm(stored)
-      if (isConfigured(stored)) {
+      if (
+        stored.translationEngine === 'browser' &&
+        stored.pageTranslationEngine === 'browser'
+      ) {
+        setStatus('已保存 · 两种文本模式均使用 Chrome 内置翻译。请回到网页刷新后再试。', true)
+      } else if (isConfigured(stored)) {
         setStatus('已保存 · 配置有效。请回到网页刷新后再试快捷键。', true)
       } else {
         setStatus('保存后校验失败，请重新填写 API Key 并保存。', false)

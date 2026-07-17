@@ -8,6 +8,8 @@ export type HotkeyConfig = {
   code: string // KeyboardEvent.code, e.g. 'KeyL'
 }
 
+export type TranslationEngine = 'external' | 'browser'
+
 export type UserSettings = {
   baseURL: string
   apiKey: string
@@ -22,13 +24,24 @@ export type UserSettings = {
   sourceLang: string
   targetLang: string
   autoTranslate: boolean
-  /** Use Chrome's on-device Translator API after the configured API fails or is absent. */
-  browserTranslatorFallback: boolean
+  /** Text translation uses exactly one engine; image translation always requires the external API. */
+  translationEngine: TranslationEngine
+  /** Engine used by the full-page bilingual DOM translation mode. */
+  pageTranslationEngine: TranslationEngine
+  pageTranslationFontSizePx: number
+  pageTranslationUseCustomColor: boolean
+  pageTranslationTextColor: string
+  pageTranslationUseBackground: boolean
+  pageTranslationBackgroundColor: string
+  pageTranslationBold: boolean
+  pageTranslationItalic: boolean
+  pageTranslationUnderline: boolean
   lensWidthPx: number
   minTextLength: number
   batchCharLimit: number
   prefetchMarginRatio: number // 0.5 = half viewport
   hotkey: HotkeyConfig
+  pageTranslationHotkey: HotkeyConfig
   pausedHostnames: string[]
 }
 
@@ -42,7 +55,16 @@ export const DEFAULT_SETTINGS: UserSettings = {
   targetLang: 'zh',
   /** Default off: only translate the block under the lens (fast first paint). */
   autoTranslate: false,
-  browserTranslatorFallback: true,
+  translationEngine: 'external',
+  pageTranslationEngine: 'browser',
+  pageTranslationFontSizePx: 16,
+  pageTranslationUseCustomColor: false,
+  pageTranslationTextColor: '#0e7490',
+  pageTranslationUseBackground: false,
+  pageTranslationBackgroundColor: '#ecfeff',
+  pageTranslationBold: false,
+  pageTranslationItalic: false,
+  pageTranslationUnderline: false,
   lensWidthPx: 320,
   minTextLength: 10,
   batchCharLimit: 6000,
@@ -53,6 +75,13 @@ export const DEFAULT_SETTINGS: UserSettings = {
     ctrlKey: false,
     metaKey: false,
     code: 'KeyL',
+  },
+  pageTranslationHotkey: {
+    altKey: true,
+    shiftKey: true,
+    ctrlKey: false,
+    metaKey: false,
+    code: 'Semicolon',
   },
   pausedHostnames: [],
 }
@@ -65,6 +94,10 @@ function asProviderId(v: unknown): ProviderId {
 function asReasoningPref(v: unknown): ReasoningPref {
   if (v === 'off' || v === 'low' || v === 'medium' || v === 'high') return v
   return DEFAULT_SETTINGS.reasoningPref
+}
+
+function asTranslationEngine(v: unknown, fallback: TranslationEngine): TranslationEngine {
+  return v === 'browser' || v === 'external' ? v : fallback
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -81,10 +114,25 @@ function stringValue(value: unknown, fallback: string): string {
   return value === null || value === undefined ? fallback : String(value)
 }
 
+function colorValue(value: unknown, fallback: string): string {
+  return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback
+}
+
+function hotkeyValue(value: unknown, fallback: HotkeyConfig): HotkeyConfig {
+  const hotkey = isRecord(value) ? value : {}
+  return {
+    altKey: typeof hotkey.altKey === 'boolean' ? hotkey.altKey : fallback.altKey,
+    shiftKey: typeof hotkey.shiftKey === 'boolean' ? hotkey.shiftKey : fallback.shiftKey,
+    ctrlKey: typeof hotkey.ctrlKey === 'boolean' ? hotkey.ctrlKey : fallback.ctrlKey,
+    metaKey: typeof hotkey.metaKey === 'boolean' ? hotkey.metaKey : fallback.metaKey,
+    code:
+      typeof hotkey.code === 'string' && hotkey.code.length <= 64 ? hotkey.code : fallback.code,
+  }
+}
+
 /** Validate persisted/untrusted settings and fill every omitted or malformed field. */
 export function mergeSettings(partial: unknown): UserSettings {
   const p = isRecord(partial) ? partial : {}
-  const hotkey = isRecord(p.hotkey) ? p.hotkey : {}
   return {
     baseURL: stringValue(p.baseURL, DEFAULT_SETTINGS.baseURL),
     apiKey: stringValue(p.apiKey, DEFAULT_SETTINGS.apiKey),
@@ -95,10 +143,45 @@ export function mergeSettings(partial: unknown): UserSettings {
     targetLang: stringValue(p.targetLang, DEFAULT_SETTINGS.targetLang).slice(0, 64),
     autoTranslate:
       typeof p.autoTranslate === 'boolean' ? p.autoTranslate : DEFAULT_SETTINGS.autoTranslate,
-    browserTranslatorFallback:
-      typeof p.browserTranslatorFallback === 'boolean'
-        ? p.browserTranslatorFallback
-        : DEFAULT_SETTINGS.browserTranslatorFallback,
+    translationEngine: asTranslationEngine(p.translationEngine, DEFAULT_SETTINGS.translationEngine),
+    pageTranslationEngine: asTranslationEngine(
+      p.pageTranslationEngine,
+      DEFAULT_SETTINGS.pageTranslationEngine,
+    ),
+    pageTranslationFontSizePx: finiteNumber(
+      p.pageTranslationFontSizePx,
+      DEFAULT_SETTINGS.pageTranslationFontSizePx,
+      10,
+      32,
+    ),
+    pageTranslationUseCustomColor:
+      typeof p.pageTranslationUseCustomColor === 'boolean'
+        ? p.pageTranslationUseCustomColor
+        : DEFAULT_SETTINGS.pageTranslationUseCustomColor,
+    pageTranslationTextColor: colorValue(
+      p.pageTranslationTextColor,
+      DEFAULT_SETTINGS.pageTranslationTextColor,
+    ),
+    pageTranslationUseBackground:
+      typeof p.pageTranslationUseBackground === 'boolean'
+        ? p.pageTranslationUseBackground
+        : DEFAULT_SETTINGS.pageTranslationUseBackground,
+    pageTranslationBackgroundColor: colorValue(
+      p.pageTranslationBackgroundColor,
+      DEFAULT_SETTINGS.pageTranslationBackgroundColor,
+    ),
+    pageTranslationBold:
+      typeof p.pageTranslationBold === 'boolean'
+        ? p.pageTranslationBold
+        : DEFAULT_SETTINGS.pageTranslationBold,
+    pageTranslationItalic:
+      typeof p.pageTranslationItalic === 'boolean'
+        ? p.pageTranslationItalic
+        : DEFAULT_SETTINGS.pageTranslationItalic,
+    pageTranslationUnderline:
+      typeof p.pageTranslationUnderline === 'boolean'
+        ? p.pageTranslationUnderline
+        : DEFAULT_SETTINGS.pageTranslationUnderline,
     lensWidthPx: finiteNumber(p.lensWidthPx, DEFAULT_SETTINGS.lensWidthPx, 120, 800),
     minTextLength: finiteNumber(p.minTextLength, DEFAULT_SETTINGS.minTextLength, 1, 1000),
     batchCharLimit: finiteNumber(
@@ -113,19 +196,11 @@ export function mergeSettings(partial: unknown): UserSettings {
       0,
       5,
     ),
-    hotkey: {
-      altKey: typeof hotkey.altKey === 'boolean' ? hotkey.altKey : DEFAULT_SETTINGS.hotkey.altKey,
-      shiftKey:
-        typeof hotkey.shiftKey === 'boolean' ? hotkey.shiftKey : DEFAULT_SETTINGS.hotkey.shiftKey,
-      ctrlKey:
-        typeof hotkey.ctrlKey === 'boolean' ? hotkey.ctrlKey : DEFAULT_SETTINGS.hotkey.ctrlKey,
-      metaKey:
-        typeof hotkey.metaKey === 'boolean' ? hotkey.metaKey : DEFAULT_SETTINGS.hotkey.metaKey,
-      code:
-        typeof hotkey.code === 'string' && hotkey.code.length <= 64
-          ? hotkey.code
-          : DEFAULT_SETTINGS.hotkey.code,
-    },
+    hotkey: hotkeyValue(p.hotkey, DEFAULT_SETTINGS.hotkey),
+    pageTranslationHotkey: hotkeyValue(
+      p.pageTranslationHotkey,
+      DEFAULT_SETTINGS.pageTranslationHotkey,
+    ),
     pausedHostnames: Array.isArray(p.pausedHostnames)
       ? p.pausedHostnames
           .filter((hostname): hostname is string => typeof hostname === 'string')

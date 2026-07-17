@@ -28,14 +28,23 @@ function hostnameFromUrl(url: string | undefined): string {
 function renderStatus(settings: UserSettings): void {
   const configured = isConfigured(settings)
   const api = el<HTMLElement>('apiStatus')
-  if (configured) {
-    api.textContent = '已配置'
+  if (settings.translationEngine === 'browser') {
+    api.textContent = 'Chrome 内置'
+    api.className = 'pill ok'
+  } else if (configured) {
+    api.textContent = '外部 LLM'
     api.className = 'pill ok'
   } else {
     const miss = missingConfigFields(settings)
     api.textContent = miss.length ? `缺 ${miss.join('/')}` : '未配置'
     api.className = 'pill warn'
   }
+
+  const pageEngine = el<HTMLElement>('pageEngineStatus')
+  pageEngine.textContent =
+    settings.pageTranslationEngine === 'browser' ? 'Chrome 内置' : '外部 LLM'
+  pageEngine.className =
+    settings.pageTranslationEngine === 'browser' || configured ? 'pill ok' : 'pill warn'
 
   const auto = el<HTMLInputElement>('autoToggle')
   auto.checked = settings.autoTranslate
@@ -47,7 +56,9 @@ function renderStatus(settings: UserSettings): void {
   el<HTMLElement>('hotkeyHint').textContent = `${label}：按住临时显示 · 短按保持打开`
 
   const tip = el<HTMLElement>('unconfiguredTip')
-  if (configured) {
+  const needsExternal =
+    settings.translationEngine === 'external' || settings.pageTranslationEngine === 'external'
+  if (configured || !needsExternal) {
     tip.hidden = true
   } else {
     tip.hidden = false
@@ -56,6 +67,10 @@ function renderStatus(settings: UserSettings): void {
       ? `尚未配置完整：请填写 ${miss.join('、')}`
       : '尚未配置 API，请打开设置填写并保存。'
   }
+
+  const pageHotkey = formatHotkeyLabel(settings.pageTranslationHotkey)
+  el<HTMLElement>('usageHint').textContent =
+    `${pageHotkey}：切换整页中英双语翻译。图片仍需要外部视觉模型。`
 }
 
 async function setHostnamePaused(hostname: string, paused: boolean): Promise<UserSettings> {

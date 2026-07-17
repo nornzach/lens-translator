@@ -50,12 +50,22 @@ export type ContentSettings = Pick<
   | 'sourceLang'
   | 'targetLang'
   | 'autoTranslate'
-  | 'browserTranslatorFallback'
+  | 'translationEngine'
+  | 'pageTranslationEngine'
+  | 'pageTranslationFontSizePx'
+  | 'pageTranslationUseCustomColor'
+  | 'pageTranslationTextColor'
+  | 'pageTranslationUseBackground'
+  | 'pageTranslationBackgroundColor'
+  | 'pageTranslationBold'
+  | 'pageTranslationItalic'
+  | 'pageTranslationUnderline'
   | 'lensWidthPx'
   | 'minTextLength'
   | 'batchCharLimit'
   | 'prefetchMarginRatio'
   | 'hotkey'
+  | 'pageTranslationHotkey'
 > & { apiKey: '' }
 
 export type SettingsMsg = {

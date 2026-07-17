@@ -99,6 +99,21 @@ select {
   font: inherit;
 }
 
+input[type='color'] {
+  width: 100%;
+  min-height: 2.45rem;
+  padding: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  cursor: pointer;
+}
+
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 select {
   appearance: auto;
   cursor: pointer;
@@ -114,6 +129,18 @@ input:focus {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.75rem;
+}
+
+.style-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.style-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 1rem;
 }
 
 .hotkey-row {
@@ -216,6 +243,10 @@ input:focus {
 
 @media (max-width: 480px) {
   .row {
+    grid-template-columns: 1fr;
+  }
+
+  .style-grid {
     grid-template-columns: 1fr;
   }
 }

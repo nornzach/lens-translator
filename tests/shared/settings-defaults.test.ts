@@ -12,7 +12,11 @@ describe('DEFAULT_SETTINGS', () => {
     expect(DEFAULT_SETTINGS.sourceLang).toBe('en')
     expect(DEFAULT_SETTINGS.targetLang).toBe('zh')
     expect(DEFAULT_SETTINGS.autoTranslate).toBe(false)
-    expect(DEFAULT_SETTINGS.browserTranslatorFallback).toBe(true)
+    expect(DEFAULT_SETTINGS.translationEngine).toBe('external')
+    expect(DEFAULT_SETTINGS.pageTranslationEngine).toBe('browser')
+    expect(DEFAULT_SETTINGS.pageTranslationFontSizePx).toBe(16)
+    expect(DEFAULT_SETTINGS.pageTranslationUseCustomColor).toBe(false)
+    expect(DEFAULT_SETTINGS.pageTranslationUseBackground).toBe(false)
     expect(DEFAULT_SETTINGS.lensWidthPx).toBe(320)
     expect(DEFAULT_SETTINGS.minTextLength).toBe(10)
     expect(DEFAULT_SETTINGS.batchCharLimit).toBe(6000)
@@ -23,6 +27,13 @@ describe('DEFAULT_SETTINGS', () => {
       metaKey: false,
       code: 'KeyL',
     })
+    expect(DEFAULT_SETTINGS.pageTranslationHotkey).toEqual({
+      altKey: true,
+      shiftKey: true,
+      ctrlKey: false,
+      metaKey: false,
+      code: 'Semicolon',
+    })
     expect(DEFAULT_SETTINGS.pausedHostnames).toEqual([])
   })
 })
@@ -32,7 +43,10 @@ describe('mergeSettings', () => {
     const merged = mergeSettings({ apiKey: 'sk-test' })
     expect(merged.apiKey).toBe('sk-test')
     expect(merged.autoTranslate).toBe(false)
-    expect(merged.browserTranslatorFallback).toBe(true)
+    expect(merged.translationEngine).toBe('external')
+    expect(merged.pageTranslationEngine).toBe('browser')
+    expect(merged.pageTranslationHotkey).toEqual(DEFAULT_SETTINGS.pageTranslationHotkey)
+    expect(merged.pageTranslationFontSizePx).toBe(16)
     expect(merged.model).toBe(DEFAULT_SETTINGS.model)
   })
 
@@ -41,12 +55,14 @@ describe('mergeSettings', () => {
     expect(merged.pausedHostnames).toEqual(['example.com'])
   })
 
-  it('accepts only boolean browser fallback values from storage', () => {
-    expect(mergeSettings({ browserTranslatorFallback: false }).browserTranslatorFallback).toBe(false)
-    expect(
-      mergeSettings({ browserTranslatorFallback: 'enabled' as unknown as boolean })
-        .browserTranslatorFallback,
-    ).toBe(true)
+  it('accepts only known translation engines from storage', () => {
+    expect(mergeSettings({ translationEngine: 'browser' }).translationEngine).toBe('browser')
+    expect(mergeSettings({ translationEngine: 'external' }).translationEngine).toBe('external')
+    expect(mergeSettings({ translationEngine: 'fallback' }).translationEngine).toBe('external')
+    expect(mergeSettings({ browserTranslatorFallback: true }).translationEngine).toBe('external')
+    expect(mergeSettings({ pageTranslationEngine: 'external' }).pageTranslationEngine).toBe(
+      'external',
+    )
   })
 
   it('coerces non-string fields from storage', () => {
@@ -58,6 +74,23 @@ describe('mergeSettings', () => {
     expect(merged.baseURL).toBe('123')
     expect(merged.apiKey).toBe('')
     expect(merged.model).toBe(DEFAULT_SETTINGS.model)
+  })
+
+  it('validates full-page translation appearance settings', () => {
+    const merged = mergeSettings({
+      pageTranslationFontSizePx: 100,
+      pageTranslationTextColor: 'red',
+      pageTranslationBackgroundColor: '#123456',
+      pageTranslationBold: true,
+      pageTranslationItalic: true,
+      pageTranslationUnderline: true,
+    })
+    expect(merged.pageTranslationFontSizePx).toBe(32)
+    expect(merged.pageTranslationTextColor).toBe(DEFAULT_SETTINGS.pageTranslationTextColor)
+    expect(merged.pageTranslationBackgroundColor).toBe('#123456')
+    expect(merged.pageTranslationBold).toBe(true)
+    expect(merged.pageTranslationItalic).toBe(true)
+    expect(merged.pageTranslationUnderline).toBe(true)
   })
 })
 

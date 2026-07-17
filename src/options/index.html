@@ -84,17 +84,23 @@
               <input id="targetLang" name="targetLang" type="text" placeholder="zh" />
             </label>
           </div>
-          <label class="checkbox">
-            <input id="autoTranslate" name="autoTranslate" type="checkbox" />
-            自动预译可见区（会在页面更新和滚动时主动发送可见文本；敏感页面请关闭）
-          </label>
-          <label class="checkbox">
-            <input id="browserTranslatorFallback" name="browserTranslatorFallback" type="checkbox" />
-            API 不可用时使用 Chrome 内置翻译兜底（需 Chrome 138+；首次使用可能下载语言包）
+          <label>
+            翻译透镜文本引擎
+            <select id="translationEngine" name="translationEngine">
+              <option value="external">外部 LLM（使用上方 API 配置）</option>
+              <option value="browser">Chrome 内置翻译（Chrome 138+）</option>
+            </select>
           </label>
           <p class="hint">
-            图片：会将完整图片发送到当前配置的视觉模型，不只是图中文字。仅处理 JPEG、PNG、
-            WebP、GIF，单张最多 4 MB；敏感图片请勿使用。
+            两种引擎不会互相兜底。Chrome 内置翻译在设备侧处理文本，首次使用可能下载语言包。
+          </p>
+          <label class="checkbox">
+            <input id="autoTranslate" name="autoTranslate" type="checkbox" />
+            自动预译可见区（会在页面更新和滚动时主动翻译可见文本；外部 LLM 模式会发送文本）
+          </label>
+          <p class="hint">
+            图片不受文本引擎选项影响：始终需要上方已配置的外部视觉模型，并会发送完整图片，
+            不只是图中文字。仅处理 JPEG、PNG、WebP、GIF，单张最多 4 MB；敏感图片请勿使用。
           </p>
           <label>
             透镜宽度（px）
@@ -103,7 +109,7 @@
         </section>
 
         <section class="card">
-          <h2>快捷键</h2>
+          <h2>翻译透镜快捷键</h2>
           <p class="hint">点击「录制」后按下组合键。Mac 上 Option 即 Alt。</p>
           <div class="hotkey-capture">
             <span id="hotkeyPreview" class="hotkey-preview">Option+Shift+L</span>
@@ -115,6 +121,87 @@
           <input type="hidden" id="hotkeyMeta" />
           <input type="hidden" id="hotkeyCode" />
           <p id="captureHint" class="hint capture-hint" hidden>请按下快捷键…（Esc 取消）</p>
+        </section>
+
+        <section class="card">
+          <h2>整页双语翻译</h2>
+          <label>
+            翻译引擎
+            <select id="pageTranslationEngine" name="pageTranslationEngine">
+              <option value="browser">Chrome 内置翻译（推荐，更快）</option>
+              <option value="external">外部 LLM（使用上方 API 配置）</option>
+            </select>
+          </label>
+          <p class="hint">保留页面原文并在每个 DOM 文本块内追加译文；再次按快捷键或按 Esc 退出。</p>
+          <div class="style-grid">
+            <label>
+              译文字号（px）
+              <input
+                id="pageTranslationFontSizePx"
+                name="pageTranslationFontSizePx"
+                type="number"
+                min="10"
+                max="32"
+                step="1"
+              />
+            </label>
+            <label class="color-field">
+              文字颜色
+              <input id="pageTranslationTextColor" name="pageTranslationTextColor" type="color" />
+            </label>
+            <label class="color-field">
+              色块颜色
+              <input
+                id="pageTranslationBackgroundColor"
+                name="pageTranslationBackgroundColor"
+                type="color"
+              />
+            </label>
+          </div>
+          <div class="style-toggles">
+            <label class="checkbox">
+              <input
+                id="pageTranslationUseCustomColor"
+                name="pageTranslationUseCustomColor"
+                type="checkbox"
+              />
+              自定义文字颜色
+            </label>
+            <label class="checkbox">
+              <input
+                id="pageTranslationUseBackground"
+                name="pageTranslationUseBackground"
+                type="checkbox"
+              />
+              显示颜色块
+            </label>
+            <label class="checkbox">
+              <input id="pageTranslationBold" name="pageTranslationBold" type="checkbox" />
+              加粗
+            </label>
+            <label class="checkbox">
+              <input id="pageTranslationItalic" name="pageTranslationItalic" type="checkbox" />
+              斜体
+            </label>
+            <label class="checkbox">
+              <input
+                id="pageTranslationUnderline"
+                name="pageTranslationUnderline"
+                type="checkbox"
+              />
+              下划线
+            </label>
+          </div>
+          <div class="hotkey-capture">
+            <span id="pageHotkeyPreview" class="hotkey-preview">Option+Shift+;</span>
+            <button type="button" id="capturePageHotkey" class="btn">录制快捷键</button>
+          </div>
+          <input type="hidden" id="pageHotkeyAlt" />
+          <input type="hidden" id="pageHotkeyShift" />
+          <input type="hidden" id="pageHotkeyCtrl" />
+          <input type="hidden" id="pageHotkeyMeta" />
+          <input type="hidden" id="pageHotkeyCode" />
+          <p id="capturePageHint" class="hint capture-hint" hidden>请按下快捷键…（Esc 取消）</p>
         </section>
 
         <section class="card">

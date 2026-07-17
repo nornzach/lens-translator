@@ -37,7 +37,7 @@ export class BrowserTranslator {
     return this.runExclusive(() => this.prepareNow(sourceLanguage, targetLanguage))
   }
 
-  /** Translate on device; unsupported pairs and browser failures degrade to null for cloud fallback. */
+  /** Translate on device; unsupported pairs and browser failures return null to the caller. */
   translate(
     text: string,
     sourceLanguage: string,

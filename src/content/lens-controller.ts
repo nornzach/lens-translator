@@ -18,6 +18,7 @@ import { BrowserTranslator } from './browser-translator'
 import { ImageRegistry, type ImageTranslationEntry } from './image-registry'
 import { makePageKey } from './page-key'
 import { TranslationBatcher } from './translation-batcher'
+import { PageTranslator } from './page-translator'
 
 const TAP_STICKY_MS = 320
 
@@ -80,10 +81,30 @@ function translateSigOf(s: UserSettings, isConfiguredFlag: boolean): string {
     s.sourceLang,
     s.targetLang,
     s.autoTranslate,
-    s.browserTranslatorFallback,
+    s.translationEngine,
+    s.pageTranslationEngine,
+    s.pageTranslationFontSizePx,
+    s.pageTranslationUseCustomColor,
+    s.pageTranslationTextColor,
+    s.pageTranslationUseBackground,
+    s.pageTranslationBackgroundColor,
+    s.pageTranslationBold,
+    s.pageTranslationItalic,
+    s.pageTranslationUnderline,
+    formatHotkeySig(s.pageTranslationHotkey),
     s.minTextLength,
     s.batchCharLimit,
   ].join('\0')
+}
+
+function formatHotkeySig(hotkey: UserSettings['hotkey']): string {
+  return [
+    hotkey.altKey,
+    hotkey.shiftKey,
+    hotkey.ctrlKey,
+    hotkey.metaKey,
+    hotkey.code,
+  ].join(':')
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +120,7 @@ export class LensController {
   private readonly registry = new BlockRegistry()
   private readonly imageRegistry = new ImageRegistry()
   private readonly browserTranslator = new BrowserTranslator()
+  private readonly pageTranslator = new PageTranslator(this.browserTranslator)
   private readonly lens: LensOverlay
   private readonly batcher: TranslationBatcher
 
@@ -169,7 +191,10 @@ export class LensController {
       this.configured = response.configured
       this.settings = mergeSettings(response.settings)
       this.pausedHere = response.paused
-      if (this.pausedHere && this.lensActive) this.deactivateLens()
+      if (this.pausedHere) {
+        if (this.lensActive) this.deactivateLens()
+        if (this.pageTranslator.isActive()) this.pageTranslator.deactivate()
+      }
       this.lens.setWidth(this.settings.lensWidthPx)
 
       const sig = translateSigOf(this.settings, this.configured)
@@ -177,7 +202,11 @@ export class LensController {
       const previousSig = this.translateSettingsSig
       this.translateSettingsSig = sig
 
-      if (this.configured && changed) {
+      if (previousSig !== '' && changed && this.pageTranslator.isActive()) {
+        this.pageTranslator.deactivate()
+      }
+
+      if (this.canTranslateText() && changed) {
         if (previousSig !== '') this.registry.resetErrorsToPending()
         if (this.settings.autoTranslate) void this.scanVisibleAndTranslate()
       }
@@ -199,7 +228,7 @@ export class LensController {
   }
 
   async scanVisibleAndTranslate(): Promise<void> {
-    if (this.pausedHere || !this.settings.autoTranslate || !this.configured) return
+    if (this.pausedHere || !this.settings.autoTranslate || !this.canTranslateText()) return
     const margin = Math.round(window.innerHeight * this.settings.prefetchMarginRatio)
     const blocks = extractVisibleBlocks(this.settings.minTextLength, margin)
     for (const b of blocks) {
@@ -215,13 +244,31 @@ export class LensController {
   // -------------------------------------------------------------------------
 
   private readonly onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape' && this.lensActive) {
-      e.preventDefault()
-      this.deactivateLens()
-      return
+    if (e.key === 'Escape') {
+      if (this.lensActive) {
+        e.preventDefault()
+        this.deactivateLens()
+        return
+      }
+      if (this.pageTranslator.isActive()) {
+        e.preventDefault()
+        this.pageTranslator.deactivate()
+        return
+      }
     }
 
     if (this.pausedHere) return
+    if (matchesHotkey(e, this.settings.pageTranslationHotkey)) {
+      if (e.repeat) {
+        e.preventDefault()
+        return
+      }
+      e.preventDefault()
+      e.stopPropagation()
+      if (this.lensActive) this.deactivateLens()
+      void this.pageTranslator.toggle(this.settings, this.configured)
+      return
+    }
     if (!matchesHotkey(e, this.settings.hotkey)) return
     if (e.repeat) {
       e.preventDefault()
@@ -240,7 +287,7 @@ export class LensController {
       this.lensSticky = false
       this.hotkeyDownAt = Date.now()
       this.ensureMouseSeed()
-      if (this.settings.browserTranslatorFallback && this.browserTranslator.isSupported()) {
+      if (this.settings.translationEngine === 'browser' && this.browserTranslator.isSupported()) {
         void this.browserTranslator.prepare(this.settings.sourceLang, this.settings.targetLang)
       }
       this.updateLens()
@@ -320,10 +367,7 @@ export class LensController {
       return
     }
 
-    if (
-      !this.configured &&
-      (!this.settings.browserTranslatorFallback || !this.browserTranslator.isSupported())
-    ) {
+    if (!this.canTranslateText()) {
       this.lens.showAt(this.lastMouse.x, this.lastMouse.y, { kind: 'unconfigured' })
       this.lens.highlight(null)
       return
@@ -414,11 +458,11 @@ export class LensController {
   }
 
   /**
-   * Translate unresolved blocks with Chrome's on-device Translator API.
-   * The browser session is sequential; no configured API endpoint is contacted.
+   * Translate blocks with Chrome's on-device Translator API. The browser session
+   * is sequential, and no configured API endpoint is contacted.
    */
   private async translateWithBrowser(blocks: TranslateBlock[]): Promise<void> {
-    if (!this.settings.browserTranslatorFallback || !this.browserTranslator.isSupported()) return
+    if (!this.browserTranslator.isSupported()) return
 
     for (const block of blocks) {
       const translation = await this.browserTranslator.translate(
@@ -431,8 +475,8 @@ export class LensController {
   }
 
   /**
-   * Send blocks to the configured API, then use Chrome's on-device translator
-   * for any unresolved blocks when the fallback is enabled.
+   * Translate blocks using only the selected text engine. Engines never fall
+   * back to each other.
    */
   async translateSpecific(blocks: TranslateBlock[]): Promise<void> {
     if (this.pausedHere) return
@@ -462,9 +506,14 @@ export class LensController {
       this.registry.setPending(b.id)
     }
 
-    let error = this.configured ? '翻译失败' : 'API 未配置，Chrome 内置翻译不可用'
+    let error =
+      this.settings.translationEngine === 'browser'
+        ? 'Chrome 内置翻译不可用或不支持当前语言对'
+        : '外部 API 未配置'
     try {
-      if (this.configured) {
+      if (this.settings.translationEngine === 'browser') {
+        await this.translateWithBrowser(todo)
+      } else if (this.configured) {
         const response: unknown = await chrome.runtime.sendMessage({
           type: 'translate-batch',
           pageKey: makePageKey(),
@@ -480,15 +529,11 @@ export class LensController {
         }
       }
 
-      const unresolved = todo.filter((b) => !this.registry.get(b.id)?.translation)
-      if (unresolved.length) await this.translateWithBrowser(unresolved)
-
       for (const b of todo) {
         if (!this.registry.get(b.id)?.translation) this.registry.setError(b.id, error)
       }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
-      await this.translateWithBrowser(todo.filter((b) => !this.registry.get(b.id)?.translation))
       for (const b of todo) {
         if (!this.registry.get(b.id)?.translation) this.registry.setError(b.id, error)
       }
@@ -505,6 +550,12 @@ export class LensController {
   // -------------------------------------------------------------------------
   // Helpers
   // -------------------------------------------------------------------------
+
+  private canTranslateText(): boolean {
+    return this.settings.translationEngine === 'browser'
+      ? this.browserTranslator.isSupported()
+      : this.configured
+  }
 
   private imageEntryForHit(hit: Element | null): ImageTranslationEntry | undefined {
     if (!(hit instanceof HTMLImageElement)) return undefined

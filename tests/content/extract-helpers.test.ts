@@ -8,6 +8,8 @@ import {
   isUiLabelElement,
   dedupeNestedBlocks,
   extractBlockAtElement,
+  extractPageBlocks,
+  extractVisibleBlocks,
   PHRASING_TAGS,
   type ExtractedBlock,
 } from '../../src/content/extract'
@@ -177,6 +179,72 @@ describe('phrasing + hints', () => {
     })
   })
 
+  it('extracts rendered offscreen blocks for full-page translation', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    })
+    const paragraph = fakeEl({
+      tag: 'p',
+      text: 'This paragraph is rendered far below the current viewport.',
+    })
+    paragraph.getBoundingClientRect = () => ({
+      width: 600,
+      height: 40,
+      top: 5000,
+      left: 0,
+      bottom: 5040,
+      right: 600,
+      x: 0,
+      y: 5000,
+      toJSON: () => ({}),
+    })
+    vi.stubGlobal('document', {
+      querySelectorAll: (selector: string) =>
+        selector.startsWith('p,h1') ? [paragraph] : [],
+      createTreeWalker: () => ({ nextNode: () => null }),
+    })
+
+    expect(extractVisibleBlocks(10, 0)).toHaveLength(0)
+    expect(extractPageBlocks(10)).toMatchObject([{ el: paragraph }])
+  })
+
+  it('falls back to deeply nested text nodes with no semantic selectors', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    })
+    const host = fakeEl({ tag: 'div' })
+    const span = fakeEl({ tag: 'span' })
+    const strong = fakeEl({ tag: 'strong' })
+    Object.defineProperty(span, 'parentElement', { get: () => host })
+    Object.defineProperty(strong, 'parentElement', { get: () => span })
+    const textNode = {
+      data: 'Deep framework wrappers should still expose this sentence for translation.',
+      parentElement: strong,
+    } as unknown as Text
+    let returned = false
+    vi.stubGlobal('document', {
+      querySelectorAll: () => [],
+      createTreeWalker: () => ({
+        nextNode: () => {
+          if (returned) return null
+          returned = true
+          return textNode
+        },
+      }),
+    })
+
+    expect(extractPageBlocks(10)).toMatchObject([
+      {
+        el: host,
+        text: 'Deep framework wrappers should still expose this sentence for translation.',
+      },
+    ])
+  })
+
 describe('dedupeNestedBlocks', () => {
   it('drops parent when child covers most text', () => {
     const childEl = fakeEl({
@@ -191,6 +259,7 @@ describe('dedupeNestedBlocks', () => {
     // parent contains child
     parentEl.contains = (o: Node) => o === (childEl as unknown as Node)
     childEl.contains = () => false
+    Object.defineProperty(childEl, 'parentElement', { get: () => parentEl })
 
     const blocks: ExtractedBlock[] = [
       {

@@ -3,6 +3,7 @@ import {
   matchesHotkey,
   formatHotkeyLabel,
   hotkeyFromKeyboardEvent,
+  hotkeysEqual,
   codeToKeyLabel,
 } from '../../src/shared/hotkey'
 import { DEFAULT_SETTINGS } from '../../src/shared/settings-defaults'
@@ -53,6 +54,19 @@ describe('formatHotkeyLabel', () => {
         code: 'KeyK',
       }),
     ).toBe('Ctrl+⌘+K')
+  })
+
+  it('formats the default full-page translation hotkey', () => {
+    expect(formatHotkeyLabel(DEFAULT_SETTINGS.pageTranslationHotkey)).toBe('Option+Shift+;')
+  })
+})
+
+describe('hotkeysEqual', () => {
+  it('compares the full chord', () => {
+    expect(hotkeysEqual(DEFAULT_SETTINGS.hotkey, { ...DEFAULT_SETTINGS.hotkey })).toBe(true)
+    expect(hotkeysEqual(DEFAULT_SETTINGS.hotkey, DEFAULT_SETTINGS.pageTranslationHotkey)).toBe(
+      false,
+    )
   })
 })
 
