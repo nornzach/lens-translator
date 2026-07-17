@@ -52,6 +52,7 @@ export type ContentSettings = Pick<
   | 'autoTranslate'
   | 'translationEngine'
   | 'pageTranslationEngine'
+  | 'autoPageTranslation'
   | 'pageTranslationFontSizePx'
   | 'pageTranslationUseCustomColor'
   | 'pageTranslationTextColor'

@@ -3,6 +3,7 @@ import {
   groupPageBlocks,
   isPageTranslationCandidate,
   isPageUiTranslationCandidate,
+  pageTranslationHost,
 } from '../../src/content/page-translator'
 import type { ExtractedBlock } from '../../src/content/extract'
 
@@ -37,6 +38,8 @@ function candidateElement(
   return {
     tagName: tagName.toUpperCase(),
     textContent: text,
+    children: [],
+    querySelectorAll: () => [],
     getAttribute: (name: string) => (name === 'role' ? null : null),
     closest: (selector: string) => {
       for (const item of chain) {
@@ -76,15 +79,16 @@ describe('groupPageBlocks', () => {
 describe('isPageTranslationCandidate', () => {
   it('keeps navigation and controls as compact UI translations', () => {
     const candidates = [
-      { id: 'nav', text: 'Explore topics', ancestors: [{ tagName: 'nav' }] },
-      { id: 'button', text: 'Show more results', ancestors: [{ tagName: 'button' }] },
+      { id: 'nav', text: 'Explore topics', tagName: 'span', ancestors: [{ tagName: 'nav' }] },
+      { id: 'button', text: 'Show more results', tagName: 'span', ancestors: [{ tagName: 'button' }] },
+      { id: 'link', text: 'Features overview', tagName: 'a', ancestors: [] },
     ]
 
-    for (const { id, text, ancestors } of candidates) {
+    for (const { id, text, tagName, ancestors } of candidates) {
       const candidate = {
         id,
-        el: candidateElement(text, 'span', ancestors),
-        tag: 'span',
+        el: candidateElement(text, tagName, ancestors),
+        tag: tagName,
         text,
       }
       expect(isPageTranslationCandidate(candidate, 10)).toBe(true)
@@ -95,6 +99,7 @@ describe('isPageTranslationCandidate', () => {
   it('rejects metadata links and time labels', () => {
     const candidates = [
       { id: 'handle', text: '@example_user', ancestors: [{ tagName: 'a' }] },
+      { id: 'account', text: 'Example @example_user', ancestors: [{ tagName: 'a' }] },
       { id: 'time', text: 'Yesterday morning', ancestors: [{ tagName: 'time' }] },
     ]
 
@@ -107,6 +112,15 @@ describe('isPageTranslationCandidate', () => {
       }
       expect(isPageTranslationCandidate(candidate, 2)).toBe(false)
     }
+  })
+
+  it('places UI translation on the inner text label instead of the flex link', () => {
+    const label = candidateElement('Home', 'span')
+    const link = candidateElement('Home', 'a')
+    link.querySelectorAll = (() => [label]) as unknown as typeof link.querySelectorAll
+    const candidate = { id: 'home', el: link, tag: 'a', text: 'Home' }
+
+    expect(pageTranslationHost(candidate)).toBe(label)
   })
 
   it('keeps prose, including prose with an inline link', () => {

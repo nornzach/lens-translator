@@ -328,6 +328,12 @@ function childSemanticCount(el: Element): number {
   return n
 }
 
+function hasMultipleUiLabelDescendants(el: Element): boolean {
+  return el.querySelectorAll(
+    'a, button, [role="link"], [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="option"]',
+  ).length > 1
+}
+
 /**
  * Tab labels, menu items, plain text buttons — short UI copy that learners may want.
  * e.g. POWERSHELL / CURL tabs on marketing pages.
@@ -383,8 +389,8 @@ export function isLeafTextContainer(el: Element, minTextLength: number): boolean
 
   if (!isTranslatableText(text, minTextLength)) return false
 
-  // Prefer phrasing-only leaves
-  if (isPhrasingOnly(el)) return true
+  // A wrapper around several links/buttons is a menu, not one reading unit.
+  if (isPhrasingOnly(el)) return !hasMultipleUiLabelDescendants(el)
 
   // Hinted CMS / markdown leaf blocks may wrap a single inner structure
   if (hasTextBlockHint(el)) {
@@ -464,6 +470,9 @@ function collectCandidates(root: ParentNode = document): Element[] {
   // 2b) Tab strips & plain buttons / chip links (POWERSHELL, CURL, …)
   addAll(root.querySelectorAll('button, [role="tablist"] button, [role="tablist"] a, [role="tablist"] [role="tab"]'))
   addAll(root.querySelectorAll('[role="tablist"] > *, [role="tablist"] [role="presentation"] > *'))
+
+  // 2c) Plain navigation links often have no ARIA role and must stay row-level.
+  addAll(root.querySelectorAll('a, [role="link"]'))
 
   // 3) Inside rich hosts: also grab direct leaf-ish children (div/span)
   for (const host of root.querySelectorAll(RICH_HOST_SELECTORS.join(','))) {

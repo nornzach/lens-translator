@@ -159,6 +159,19 @@ describe('phrasing + hints', () => {
     expect(isUiLabelElement(tab)).toBe(true)
     expect(isLeafTextContainer(tab, 10)).toBe(true)
   })
+
+  it('does not merge a wrapper containing multiple links into one text block', () => {
+    const first = fakeEl({ tag: 'a', text: 'Quickstart' })
+    const second = fakeEl({ tag: 'a', text: 'Features overview' })
+    const wrapper = fakeEl({
+      tag: 'div',
+      children: [first, second],
+    })
+    wrapper.querySelectorAll = ((selector: string) =>
+      selector.startsWith('a, button') ? [first, second] : []) as unknown as typeof wrapper.querySelectorAll
+
+    expect(isLeafTextContainer(wrapper, 2)).toBe(false)
+  })
 })
 
   it('extracts the pointer target without a document-wide scan', () => {
@@ -208,6 +221,26 @@ describe('phrasing + hints', () => {
 
     expect(extractVisibleBlocks(10, 0)).toHaveLength(0)
     expect(extractPageBlocks(10)).toMatchObject([{ el: paragraph }])
+  })
+
+  it('extracts plain navigation links as separate rows', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    })
+    const first = fakeEl({ tag: 'a', text: 'Quickstart' })
+    const second = fakeEl({ tag: 'a', text: 'Features overview' })
+    vi.stubGlobal('document', {
+      querySelectorAll: (selector: string) =>
+        selector === 'a, [role="link"]' ? [first, second] : [],
+      createTreeWalker: () => ({ nextNode: () => null }),
+    })
+
+    expect(extractPageBlocks(2).map((block) => block.text)).toEqual([
+      'Quickstart',
+      'Features overview',
+    ])
   })
 
   it('falls back to deeply nested text nodes with no semantic selectors', () => {

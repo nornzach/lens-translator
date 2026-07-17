@@ -25,6 +25,8 @@ import {
 const TRANSLATED_ATTR = 'data-lens-page-translated'
 const TRANSLATION_TEXT_ATTR = 'data-lens-page-translation-text'
 const UI_TRANSLATION_ATTR = 'data-lens-page-ui-translation'
+const UI_STACKED_TRANSLATION_ATTR = 'data-lens-page-ui-stacked-translation'
+const UI_CONTROL_TRANSLATION_ATTR = 'data-lens-page-ui-control-translation'
 const STYLE_ID = 'lens-translator-page-style'
 const STATUS_ID = 'lens-translator-page-status'
 
@@ -73,13 +75,32 @@ function pageStyles(settings: PageSettings): string {
   padding: 0 !important;
   border: 0 !important;
   background: transparent !important;
-  font-size: 0.78em !important;
+  color: inherit !important;
+  font-size: 0.68em !important;
   font-style: normal !important;
   font-weight: 400 !important;
   line-height: inherit !important;
   text-decoration: none !important;
+  white-space: normal !important;
+  opacity: 0.62 !important;
+}
+
+[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}][${UI_STACKED_TRANSLATION_ATTR}]::after {
+  content: attr(${TRANSLATION_TEXT_ATTR}) !important;
+  display: block !important;
+  margin: 0.12em 0 0 !important;
+  font-size: 0.58em !important;
+  line-height: 1.15 !important;
+  white-space: normal !important;
+}
+
+[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}][${UI_CONTROL_TRANSLATION_ATTR}]::after {
+  content: " · " attr(${TRANSLATION_TEXT_ATTR}) !important;
+  display: inline !important;
+  margin-left: 0.3em !important;
+  font-size: 0.7em !important;
+  line-height: inherit !important;
   white-space: nowrap !important;
-  opacity: 0.72 !important;
 }
 
 ::highlight(${PAGE_ALIGNMENT_HIGHLIGHT_NAME}) {
@@ -214,8 +235,29 @@ const PAGE_CONTROL_SELECTOR =
 
 export function isPageUiTranslationCandidate(block: ExtractedBlock): boolean {
   return Boolean(
-    block.el.closest(PAGE_UI_CHROME_SELECTOR) || block.el.closest(PAGE_CONTROL_SELECTOR),
+    isUiLabelElement(block.el) ||
+      block.el.closest(PAGE_UI_CHROME_SELECTOR) ||
+      block.el.closest(PAGE_CONTROL_SELECTOR),
   )
+}
+
+function isButtonLikeUi(block: ExtractedBlock): boolean {
+  if (block.el.closest('button, [role="button"]')) return true
+  const marker = `${block.el.getAttribute('class') ?? ''} ${block.el.getAttribute('data-testid') ?? ''}`
+  return /(?:^|[\s_-])(?:button|btn|submit)(?:$|[\s_-])/iu.test(marker)
+}
+
+/** Attach generated UI copy to the text label instead of the outer flex control. */
+export function pageTranslationHost(block: ExtractedBlock): Element {
+  if (!isPageUiTranslationCandidate(block)) return block.el
+  const text = normalizeText(block.text)
+  let host = block.el
+  for (const candidate of block.el.querySelectorAll('*')) {
+    const tag = candidate.tagName.toLowerCase()
+    if (tag === 'svg' || tag === 'path' || tag === 'img') continue
+    if (normalizeText(candidate.textContent ?? '') === text) host = candidate
+  }
+  return host
 }
 
 /** Full-page mode favors reading content over site chrome and compact metadata. */
@@ -226,6 +268,7 @@ export function isPageTranslationCandidate(
   const { el, text } = block
   if (el.closest('time')) return false
   const isUi = isPageUiTranslationCandidate(block)
+  if (isUi && /@[\p{L}\p{N}_-]+/u.test(text)) return false
   if (!isPageTranslatableText(text, isUi ? Math.min(2, minTextLength) : minTextLength)) {
     return false
   }
@@ -254,6 +297,7 @@ export class PageTranslator {
   private readonly translatedHosts = new Set<Element>()
   private readonly sourceHosts = new Map<Element, string | null>()
   private attemptedTextByHost = new WeakMap<Element, string>()
+  private sourceBlockByHost = new WeakMap<Element, Element>()
   private readonly translationCache = new Map<string, string>()
   private processedCount = 0
   private translatedCount = 0
@@ -287,6 +331,8 @@ export class PageTranslator {
       host.removeAttribute(TRANSLATED_ATTR)
       host.removeAttribute(TRANSLATION_TEXT_ATTR)
       host.removeAttribute(UI_TRANSLATION_ATTR)
+      host.removeAttribute(UI_STACKED_TRANSLATION_ATTR)
+      host.removeAttribute(UI_CONTROL_TRANSLATION_ATTR)
     }
     for (const [host, previous] of this.sourceHosts) {
       if (previous === null) host.removeAttribute(PAGE_SOURCE_ATTR)
@@ -295,6 +341,7 @@ export class PageTranslator {
     this.translatedHosts.clear()
     this.sourceHosts.clear()
     this.attemptedTextByHost = new WeakMap<Element, string>()
+    this.sourceBlockByHost = new WeakMap<Element, Element>()
     this.translationCache.clear()
     this.dirtyRoots.clear()
     this.currentSettings = null
@@ -304,7 +351,7 @@ export class PageTranslator {
     document.getElementById(STYLE_ID)?.remove()
   }
 
-  private async activate(settings: PageSettings, externalConfigured: boolean): Promise<void> {
+  async activate(settings: PageSettings, externalConfigured: boolean): Promise<void> {
     window.clearTimeout(this.statusTimer)
     this.active = true
     const generation = ++this.generation
@@ -485,16 +532,29 @@ export class PageTranslator {
   private renderGroup(group: TranslationGroup, translation: string, settings: PageSettings): void {
     this.translationCache.set(group.representative.text, translation)
     for (const block of group.blocks) {
-      if (this.translatedHosts.has(block.el) || !block.el.isConnected) continue
-      const host = block.el
+      if (!block.el.isConnected) continue
+      const isUi = isPageUiTranslationCandidate(block)
+      const host = isUi ? pageTranslationHost(block) : block.el
+      if (this.translatedHosts.has(host)) continue
       if (!this.sourceHosts.has(host)) {
         this.sourceHosts.set(host, host.getAttribute(PAGE_SOURCE_ATTR))
         host.setAttribute(PAGE_SOURCE_ATTR, block.text)
       }
       host.setAttribute(TRANSLATED_ATTR, '')
       host.setAttribute(TRANSLATION_TEXT_ATTR, translation)
-      if (isPageUiTranslationCandidate(block)) host.setAttribute(UI_TRANSLATION_ATTR, '')
+      if (isUi) {
+        host.setAttribute(UI_TRANSLATION_ATTR, '')
+        if (isButtonLikeUi(block)) {
+          host.setAttribute(UI_CONTROL_TRANSLATION_ATTR, '')
+        } else {
+          const display = window.getComputedStyle(host).display
+          if (!display.includes('flex') && !display.includes('grid')) {
+            host.setAttribute(UI_STACKED_TRANSLATION_ATTR, '')
+          }
+        }
+      }
       this.translatedHosts.add(host)
+      this.sourceBlockByHost.set(host, block.el)
       this.alignment.register(
         host,
         block.text,
@@ -576,12 +636,15 @@ export class PageTranslator {
     host.removeAttribute(TRANSLATED_ATTR)
     host.removeAttribute(TRANSLATION_TEXT_ATTR)
     host.removeAttribute(UI_TRANSLATION_ATTR)
+    host.removeAttribute(UI_STACKED_TRANSLATION_ATTR)
+    host.removeAttribute(UI_CONTROL_TRANSLATION_ATTR)
     this.translatedHosts.delete(host)
     const previous = this.sourceHosts.get(host)
     if (previous === null) host.removeAttribute(PAGE_SOURCE_ATTR)
     else if (previous !== undefined) host.setAttribute(PAGE_SOURCE_ATTR, previous)
     this.sourceHosts.delete(host)
-    this.attemptedTextByHost.delete(host)
+    this.attemptedTextByHost.delete(this.sourceBlockByHost.get(host) ?? host)
+    this.sourceBlockByHost.delete(host)
   }
 
   private cleanupDisconnectedHosts(): void {

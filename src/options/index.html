@@ -7,223 +7,388 @@
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main class="page">
-      <header class="header">
-        <h1>Lens Translator</h1>
-        <p class="help" id="helpHotkey">
-          按住快捷键临时显示透镜；短按保持打开并跟随鼠标；页面原文不会被替换。
-        </p>
-      </header>
-
-      <form id="settings-form" class="form" autocomplete="off">
-        <section class="card">
-          <h2>API（OpenAI 兼容）</h2>
-          <p id="configBadge" class="config-badge warn">状态：检测中…</p>
-          <label>
-            服务商
-            <select id="provider" name="provider">
-              <option value="auto">自动识别（按 Base URL / 模型）</option>
-              <option value="openai">OpenAI / 通用兼容</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="stepfun">StepFun 阶跃星辰</option>
-            </select>
-          </label>
-          <p class="hint" id="providerHint">
-            翻译任务默认关闭/压低思考（DeepSeek 关 thinking；StepFun 用 reasoning_effort=low）。
-          </p>
-          <label>
-            Base URL
-            <input
-              id="baseURL"
-              name="baseURL"
-              type="text"
-              inputmode="url"
-              spellcheck="false"
-              placeholder="https://api.openai.com/v1"
-            />
-          </label>
-          <label>
-            API Key
-            <input
-              id="apiKey"
-              name="apiKey"
-              type="password"
-              placeholder="sk-... 或供应商密钥"
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </label>
-          <p class="hint">再次保存时若 Key 留空，将保留已保存的密钥（不会被清空）。</p>
-          <label>
-            模型
-            <input id="model" name="model" type="text" placeholder="gpt-4o-mini" spellcheck="false" />
-          </label>
-          <label>
-            推理 / Thinking（翻译建议关）
-            <select id="reasoningPref" name="reasoningPref">
-              <option value="off">关闭 / 最低（推荐·快）</option>
-              <option value="low">低</option>
-              <option value="medium">中</option>
-              <option value="high">高（慢）</option>
-            </select>
-          </label>
-          <p class="hint">
-            DeepSeek：off → thinking.disabled；StepFun 不能关思考时 off 会落到 low。
-          </p>
-        </section>
-
-        <section class="card">
-          <h2>语言与行为</h2>
-          <div class="row">
-            <label>
-              源语言
-              <input id="sourceLang" name="sourceLang" type="text" placeholder="en" />
-            </label>
-            <label>
-              目标语言
-              <input id="targetLang" name="targetLang" type="text" placeholder="zh" />
-            </label>
-          </div>
-          <label>
-            翻译透镜文本引擎
-            <select id="translationEngine" name="translationEngine">
-              <option value="external">外部 LLM（使用上方 API 配置）</option>
-              <option value="browser">Chrome 内置翻译（Chrome 138+）</option>
-            </select>
-          </label>
-          <p class="hint">
-            两种引擎不会互相兜底。Chrome 内置翻译在设备侧处理文本，首次使用可能下载语言包。
-          </p>
-          <label class="checkbox">
-            <input id="autoTranslate" name="autoTranslate" type="checkbox" />
-            自动预译可见区（会在页面更新和滚动时主动翻译可见文本；外部 LLM 模式会发送文本）
-          </label>
-          <p class="hint">
-            图片不受文本引擎选项影响：始终需要上方已配置的外部视觉模型，并会发送完整图片，
-            不只是图中文字。仅处理 JPEG、PNG、WebP、GIF，单张最多 4 MB；敏感图片请勿使用。
-          </p>
-          <label>
-            透镜宽度（px）
-            <input id="lensWidthPx" name="lensWidthPx" type="number" min="120" max="800" step="1" />
-          </label>
-        </section>
-
-        <section class="card">
-          <h2>翻译透镜快捷键</h2>
-          <p class="hint">点击「录制」后按下组合键。Mac 上 Option 即 Alt。</p>
-          <div class="hotkey-capture">
-            <span id="hotkeyPreview" class="hotkey-preview">Option+Shift+L</span>
-            <button type="button" id="captureHotkey" class="btn">录制快捷键</button>
-          </div>
-          <input type="hidden" id="hotkeyAlt" />
-          <input type="hidden" id="hotkeyShift" />
-          <input type="hidden" id="hotkeyCtrl" />
-          <input type="hidden" id="hotkeyMeta" />
-          <input type="hidden" id="hotkeyCode" />
-          <p id="captureHint" class="hint capture-hint" hidden>请按下快捷键…（Esc 取消）</p>
-        </section>
-
-        <section class="card">
-          <h2>整页双语翻译</h2>
-          <label>
-            翻译引擎
-            <select id="pageTranslationEngine" name="pageTranslationEngine">
-              <option value="browser">Chrome 内置翻译（推荐，更快）</option>
-              <option value="external">外部 LLM（使用上方 API 配置）</option>
-            </select>
-          </label>
-          <p class="hint">保留页面原文并在每个 DOM 文本块内追加译文；再次按快捷键或按 Esc 退出。</p>
-          <div class="style-grid">
-            <label>
-              译文字号（px）
-              <input
-                id="pageTranslationFontSizePx"
-                name="pageTranslationFontSizePx"
-                type="number"
-                min="10"
-                max="32"
-                step="1"
-              />
-            </label>
-            <label class="color-field">
-              文字颜色
-              <input id="pageTranslationTextColor" name="pageTranslationTextColor" type="color" />
-            </label>
-            <label class="color-field">
-              色块颜色
-              <input
-                id="pageTranslationBackgroundColor"
-                name="pageTranslationBackgroundColor"
-                type="color"
-              />
-            </label>
-          </div>
-          <div class="style-toggles">
-            <label class="checkbox">
-              <input
-                id="pageTranslationUseCustomColor"
-                name="pageTranslationUseCustomColor"
-                type="checkbox"
-              />
-              自定义文字颜色
-            </label>
-            <label class="checkbox">
-              <input
-                id="pageTranslationUseBackground"
-                name="pageTranslationUseBackground"
-                type="checkbox"
-              />
-              显示颜色块
-            </label>
-            <label class="checkbox">
-              <input id="pageTranslationBold" name="pageTranslationBold" type="checkbox" />
-              加粗
-            </label>
-            <label class="checkbox">
-              <input id="pageTranslationItalic" name="pageTranslationItalic" type="checkbox" />
-              斜体
-            </label>
-            <label class="checkbox">
-              <input
-                id="pageTranslationUnderline"
-                name="pageTranslationUnderline"
-                type="checkbox"
-              />
-              下划线
-            </label>
-          </div>
-          <div class="hotkey-capture">
-            <span id="pageHotkeyPreview" class="hotkey-preview">Option+Shift+;</span>
-            <button type="button" id="capturePageHotkey" class="btn">录制快捷键</button>
-          </div>
-          <input type="hidden" id="pageHotkeyAlt" />
-          <input type="hidden" id="pageHotkeyShift" />
-          <input type="hidden" id="pageHotkeyCtrl" />
-          <input type="hidden" id="pageHotkeyMeta" />
-          <input type="hidden" id="pageHotkeyCode" />
-          <p id="capturePageHint" class="hint capture-hint" hidden>请按下快捷键…（Esc 取消）</p>
-        </section>
-
-        <section class="card">
-          <h2>暂停的网站</h2>
-          <label>
-            主机名，逗号分隔
-            <input
-              id="pausedHostnames"
-              name="pausedHostnames"
-              type="text"
-              placeholder="example.com, news.ycombinator.com"
-            />
-          </label>
-        </section>
-
-        <div class="actions">
-          <button type="submit" id="save" class="btn primary">保存</button>
-          <button type="button" id="reset" class="btn">恢复默认</button>
-          <span id="status" class="status" role="status" aria-live="polite"></span>
+    <header class="topbar">
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">L</span>
+        <div class="brand-copy">
+          <strong>Lens Translator</strong>
+          <span>翻译工作台</span>
         </div>
-      </form>
-    </main>
+      </div>
+      <div class="engine-summary" aria-live="polite">
+        <span class="status-dot"></span>
+        <span id="engineSummary">正在读取配置</span>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside class="sidebar">
+        <nav class="section-nav" aria-label="设置分区">
+          <a href="#general" class="active">基础翻译</a>
+          <a href="#page-translation">整页双语</a>
+          <a href="#browser-runtime">Chrome 能力</a>
+          <a href="#external-api">外部模型</a>
+          <a href="#site-rules">网站管理</a>
+        </nav>
+        <div class="sidebar-note">
+          <span>隐私边界</span>
+          <p>Chrome 内置模式在设备侧处理文本。外部模式只发送到你配置的服务。</p>
+        </div>
+      </aside>
+
+      <main class="content">
+        <div class="content-heading">
+          <p class="eyebrow">PREFERENCES</p>
+          <h1>设置</h1>
+          <p id="helpHotkey">配置翻译方式、自动行为和页面呈现。</p>
+        </div>
+
+        <form id="settings-form" autocomplete="off">
+          <section id="general" class="settings-section">
+            <header class="section-heading">
+              <div>
+                <h2>基础翻译</h2>
+                <p>控制翻译透镜的语言、引擎和交互方式。</p>
+              </div>
+            </header>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>翻译语言</h3>
+                <p>从 Chrome 内置翻译支持的语言中选择；列表同时显示 BCP 47 代码。</p>
+              </div>
+              <div class="control language-pair">
+                <label>
+                  <span>源语言</span>
+                  <select id="sourceLang" name="sourceLang"></select>
+                </label>
+                <span class="language-arrow" aria-hidden="true">→</span>
+                <label>
+                  <span>目标语言</span>
+                  <select id="targetLang" name="targetLang"></select>
+                </label>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>透镜文本引擎</h3>
+                <p>两种引擎互不兜底，失败时会显示所选引擎的具体状态。</p>
+              </div>
+              <div class="control">
+                <select id="translationEngine" name="translationEngine">
+                  <option value="external">外部 LLM</option>
+                  <option value="browser">Chrome 内置翻译</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>自动预译可见区</h3>
+                <p>滚动或页面更新时预先翻译透镜可能指向的文本。外部模式会主动发送文本。</p>
+              </div>
+              <label class="switch-control">
+                <input id="autoTranslate" name="autoTranslate" type="checkbox" />
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-label">启用</span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>透镜宽度</h3>
+                <p>调整悬浮翻译面板的固定宽度。</p>
+              </div>
+              <label class="control number-control">
+                <input id="lensWidthPx" name="lensWidthPx" type="number" min="120" max="800" step="1" />
+                <span>px</span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>透镜快捷键</h3>
+                <p>短按保持打开，按住时临时查看；Mac 上 Option 对应 Alt。</p>
+              </div>
+              <div class="control hotkey-control">
+                <kbd id="hotkeyPreview">Option+Shift+L</kbd>
+                <button type="button" id="captureHotkey" class="button secondary">录制</button>
+                <span id="captureHint" class="capture-hint" hidden>请按下组合键，Esc 取消</span>
+              </div>
+              <input type="hidden" id="hotkeyAlt" />
+              <input type="hidden" id="hotkeyShift" />
+              <input type="hidden" id="hotkeyCtrl" />
+              <input type="hidden" id="hotkeyMeta" />
+              <input type="hidden" id="hotkeyCode" />
+            </div>
+          </section>
+
+          <section id="page-translation" class="settings-section">
+            <header class="section-heading">
+              <div>
+                <h2>整页双语</h2>
+                <p>保留原文，在对应文本块下追加译文，并持续处理动态内容。</p>
+              </div>
+            </header>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>整页翻译引擎</h3>
+                <p>Chrome 内置速度更快；外部 LLM 适合需要更强上下文理解的页面。</p>
+              </div>
+              <div class="control">
+                <select id="pageTranslationEngine" name="pageTranslationEngine">
+                  <option value="browser">Chrome 内置翻译</option>
+                  <option value="external">外部 LLM</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="setting-row emphasized-row">
+              <div class="setting-copy">
+                <div class="title-with-badge">
+                  <h3>英文页面自动开启</h3>
+                  <span class="small-badge">全局</span>
+                </div>
+                <p>页面识别为英文后自动启动整页双语。站点暂停规则仍然优先。</p>
+                <p class="privacy-warning">选择外部 LLM 时，匹配到的页面文本会自动发送到所配置服务。</p>
+              </div>
+              <label class="switch-control">
+                <input id="autoPageTranslation" name="autoPageTranslation" type="checkbox" />
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-label">启用</span>
+              </label>
+            </div>
+
+            <div class="setting-row appearance-row">
+              <div class="setting-copy">
+                <h3>译文样式</h3>
+                <p>正文译文使用这些设置；紧凑菜单会自动采用更小的行内样式。</p>
+              </div>
+              <div class="control appearance-controls">
+                <label class="number-field">
+                  <span>字号</span>
+                  <span class="number-control">
+                    <input
+                      id="pageTranslationFontSizePx"
+                      name="pageTranslationFontSizePx"
+                      type="number"
+                      min="10"
+                      max="32"
+                      step="1"
+                    />
+                    <span>px</span>
+                  </span>
+                </label>
+                <div class="format-controls" aria-label="文字格式">
+                  <label class="format-choice" title="加粗">
+                    <input id="pageTranslationBold" name="pageTranslationBold" type="checkbox" />
+                    <span><strong>B</strong></span>
+                  </label>
+                  <label class="format-choice" title="斜体">
+                    <input id="pageTranslationItalic" name="pageTranslationItalic" type="checkbox" />
+                    <span><i>I</i></span>
+                  </label>
+                  <label class="format-choice" title="下划线">
+                    <input
+                      id="pageTranslationUnderline"
+                      name="pageTranslationUnderline"
+                      type="checkbox"
+                    />
+                    <span><u>U</u></span>
+                  </label>
+                </div>
+                <div class="color-controls">
+                  <label class="color-option">
+                    <input
+                      id="pageTranslationUseCustomColor"
+                      name="pageTranslationUseCustomColor"
+                      type="checkbox"
+                    />
+                    <span>自定义文字色</span>
+                    <input
+                      id="pageTranslationTextColor"
+                      name="pageTranslationTextColor"
+                      type="color"
+                      aria-label="译文文字颜色"
+                    />
+                  </label>
+                  <label class="color-option">
+                    <input
+                      id="pageTranslationUseBackground"
+                      name="pageTranslationUseBackground"
+                      type="checkbox"
+                    />
+                    <span>显示背景色</span>
+                    <input
+                      id="pageTranslationBackgroundColor"
+                      name="pageTranslationBackgroundColor"
+                      type="color"
+                      aria-label="译文背景颜色"
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>整页翻译快捷键</h3>
+                <p>再次按下或按 Esc 可退出当前页面的双语模式。</p>
+              </div>
+              <div class="control hotkey-control">
+                <kbd id="pageHotkeyPreview">Option+Shift+;</kbd>
+                <button type="button" id="capturePageHotkey" class="button secondary">录制</button>
+                <span id="capturePageHint" class="capture-hint" hidden>请按下组合键，Esc 取消</span>
+              </div>
+              <input type="hidden" id="pageHotkeyAlt" />
+              <input type="hidden" id="pageHotkeyShift" />
+              <input type="hidden" id="pageHotkeyCtrl" />
+              <input type="hidden" id="pageHotkeyMeta" />
+              <input type="hidden" id="pageHotkeyCode" />
+            </div>
+          </section>
+
+          <section id="browser-runtime" class="settings-section">
+            <header class="section-heading">
+              <div>
+                <h2>Chrome 内置能力</h2>
+                <p>运行时检测比版本号更可靠，会同时检查 API 和当前语言对。</p>
+              </div>
+            </header>
+
+            <div id="browserCapability" class="capability-panel" data-state="checking">
+              <span class="capability-indicator" aria-hidden="true"></span>
+              <div class="capability-copy">
+                <strong id="browserCapabilityTitle">正在检测 Chrome 内置翻译</strong>
+                <p id="browserCapabilityDescription">正在检查 API 和当前语言对。</p>
+              </div>
+              <button type="button" id="browserCapabilityAction" class="button secondary" hidden>
+                重新检测
+              </button>
+            </div>
+            <div class="runtime-facts">
+              <div><strong>Chrome 138+</strong><span>桌面正式版支持</span></div>
+              <div><strong>按语言对下载</strong><span>首次使用需要语言包</span></div>
+              <div><strong>设备侧处理</strong><span>文本不发送到外部模型</span></div>
+            </div>
+          </section>
+
+          <section id="external-api" class="settings-section">
+            <header class="section-heading section-heading-with-status">
+              <div>
+                <h2>外部模型</h2>
+                <p>用于外部 LLM 文本翻译和图片视觉翻译。</p>
+              </div>
+              <span id="configBadge" class="config-badge warn">检测中</span>
+            </header>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>服务商</h3>
+                <p id="providerHint">根据 Base URL 和模型自动识别兼容参数。</p>
+              </div>
+              <div class="control">
+                <select id="provider" name="provider">
+                  <option value="auto">自动识别</option>
+                  <option value="openai">OpenAI / 通用兼容</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="stepfun">StepFun 阶跃星辰</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>接口地址</h3>
+                <p>远程地址必须使用 HTTPS；本地模型可使用 localhost HTTP。</p>
+              </div>
+              <div class="control stacked-control">
+                <label>
+                  <span>Base URL</span>
+                  <input
+                    id="baseURL"
+                    name="baseURL"
+                    type="text"
+                    inputmode="url"
+                    spellcheck="false"
+                    placeholder="https://api.openai.com/v1"
+                  />
+                </label>
+                <label>
+                  <span>模型</span>
+                  <input id="model" name="model" type="text" placeholder="gpt-4o-mini" spellcheck="false" />
+                </label>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>API Key</h3>
+                <p>密钥保存在 chrome.storage.local；留空保存会保留已有密钥。</p>
+              </div>
+              <div class="control">
+                <input
+                  id="apiKey"
+                  name="apiKey"
+                  type="password"
+                  placeholder="sk-... 或供应商密钥"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>推理强度</h3>
+                <p>翻译通常不需要深度推理，关闭或降低可减少等待。</p>
+              </div>
+              <div class="control">
+                <select id="reasoningPref" name="reasoningPref">
+                  <option value="off">关闭 / 最低</option>
+                  <option value="low">低</option>
+                  <option value="medium">中</option>
+                  <option value="high">高</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          <section id="site-rules" class="settings-section">
+            <header class="section-heading">
+              <div>
+                <h2>网站管理</h2>
+                <p>暂停的网站不会启动透镜、自动预译或整页翻译。</p>
+              </div>
+            </header>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>暂停名单</h3>
+                <p>输入主机名并用逗号分隔，也可在扩展弹窗中暂停当前网站。</p>
+              </div>
+              <div class="control">
+                <input
+                  id="pausedHostnames"
+                  name="pausedHostnames"
+                  type="text"
+                  placeholder="example.com, news.ycombinator.com"
+                />
+              </div>
+            </div>
+          </section>
+
+          <div class="actionbar">
+            <span id="status" class="save-status" role="status" aria-live="polite"></span>
+            <div class="action-buttons">
+              <button type="button" id="reset" class="button secondary">恢复默认</button>
+              <button type="submit" id="save" class="button primary">保存设置</button>
+            </div>
+          </div>
+        </form>
+      </main>
+    </div>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

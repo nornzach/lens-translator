@@ -14,6 +14,18 @@ afterEach(() => {
 })
 
 describe('BrowserTranslator', () => {
+  it('reports API and language-pair availability', async () => {
+    delete testGlobal.Translator
+    const translator = new BrowserTranslator()
+    await expect(translator.availability('en', 'zh')).resolves.toBe('unsupported')
+
+    testGlobal.Translator = {
+      availability: vi.fn(async () => 'downloadable'),
+      create: vi.fn(),
+    }
+    await expect(translator.availability('en', 'zh')).resolves.toBe('downloadable')
+  })
+
   it('uses Chrome’s available on-device translator and reuses its session', async () => {
     const translate = vi.fn(async (text: string) => `中文：${text}`)
     const create = vi.fn(async () => ({ translate }))

@@ -1,4 +1,6 @@
 type TranslatorAvailability = 'available' | 'downloadable' | 'downloading' | 'unavailable'
+export type BrowserTranslatorAvailability = TranslatorAvailability | 'unsupported'
+export type BrowserTranslatorDownloadProgress = (progress: number) => void
 
 type TranslatorSession = {
   translate(text: string): Promise<string>
@@ -13,6 +15,12 @@ type TranslatorApi = {
   create(options: {
     sourceLanguage: string
     targetLanguage: string
+    monitor?: (monitor: {
+      addEventListener(
+        type: 'downloadprogress',
+        listener: (event: { loaded: number }) => void,
+      ): void
+    }) => void
   }): Promise<TranslatorSession>
 }
 
@@ -33,8 +41,28 @@ export class BrowserTranslator {
   }
 
   /** Prepare one language pair without racing an active translation or session replacement. */
-  prepare(sourceLanguage: string, targetLanguage: string): Promise<boolean> {
-    return this.runExclusive(() => this.prepareNow(sourceLanguage, targetLanguage))
+  prepare(
+    sourceLanguage: string,
+    targetLanguage: string,
+    onDownloadProgress?: BrowserTranslatorDownloadProgress,
+  ): Promise<boolean> {
+    return this.runExclusive(() =>
+      this.prepareNow(sourceLanguage, targetLanguage, onDownloadProgress),
+    )
+  }
+
+  async availability(
+    sourceLanguage: string,
+    targetLanguage: string,
+  ): Promise<BrowserTranslatorAvailability> {
+    const api = (globalThis as TranslatorGlobal).Translator
+    if (!api) return 'unsupported'
+    if (sourceLanguage === targetLanguage) return 'unavailable'
+    try {
+      return await api.availability({ sourceLanguage, targetLanguage })
+    } catch {
+      return 'unavailable'
+    }
   }
 
   /** Translate on device; unsupported pairs and browser failures return null to the caller. */
@@ -54,12 +82,16 @@ export class BrowserTranslator {
     })
   }
 
-  private async prepareNow(sourceLanguage: string, targetLanguage: string): Promise<boolean> {
+  private async prepareNow(
+    sourceLanguage: string,
+    targetLanguage: string,
+    onDownloadProgress?: BrowserTranslatorDownloadProgress,
+  ): Promise<boolean> {
     const api = (globalThis as TranslatorGlobal).Translator
     const pair = `${sourceLanguage}\0${targetLanguage}`
     if (!api || sourceLanguage === targetLanguage) return false
     if (this.session && this.languagePair === pair) return true
-    return this.createSession(api, sourceLanguage, targetLanguage, pair)
+    return this.createSession(api, sourceLanguage, targetLanguage, pair, onDownloadProgress)
   }
 
   private async createSession(
@@ -67,12 +99,30 @@ export class BrowserTranslator {
     sourceLanguage: string,
     targetLanguage: string,
     pair: string,
+    onDownloadProgress?: BrowserTranslatorDownloadProgress,
   ): Promise<boolean> {
     try {
       const availability = await api.availability({ sourceLanguage, targetLanguage })
       if (availability === 'unavailable') return false
 
-      const next = await api.create({ sourceLanguage, targetLanguage })
+      const next = await api.create({
+        sourceLanguage,
+        targetLanguage,
+        ...(onDownloadProgress
+          ? {
+              monitor: (monitor: {
+                addEventListener(
+                  type: 'downloadprogress',
+                  listener: (event: { loaded: number }) => void,
+                ): void
+              }) => {
+                monitor.addEventListener('downloadprogress', (event) => {
+                  onDownloadProgress(Math.max(0, Math.min(1, event.loaded)))
+                })
+              },
+            }
+          : {}),
+      })
       this.session?.destroy?.()
       this.session = next
       this.languagePair = pair

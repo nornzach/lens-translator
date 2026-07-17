@@ -14,6 +14,7 @@ describe('DEFAULT_SETTINGS', () => {
     expect(DEFAULT_SETTINGS.autoTranslate).toBe(false)
     expect(DEFAULT_SETTINGS.translationEngine).toBe('external')
     expect(DEFAULT_SETTINGS.pageTranslationEngine).toBe('browser')
+    expect(DEFAULT_SETTINGS.autoPageTranslation).toBe(false)
     expect(DEFAULT_SETTINGS.pageTranslationFontSizePx).toBe(16)
     expect(DEFAULT_SETTINGS.pageTranslationUseCustomColor).toBe(false)
     expect(DEFAULT_SETTINGS.pageTranslationUseBackground).toBe(false)
@@ -45,6 +46,7 @@ describe('mergeSettings', () => {
     expect(merged.autoTranslate).toBe(false)
     expect(merged.translationEngine).toBe('external')
     expect(merged.pageTranslationEngine).toBe('browser')
+    expect(merged.autoPageTranslation).toBe(false)
     expect(merged.pageTranslationHotkey).toEqual(DEFAULT_SETTINGS.pageTranslationHotkey)
     expect(merged.pageTranslationFontSizePx).toBe(16)
     expect(merged.model).toBe(DEFAULT_SETTINGS.model)
@@ -63,6 +65,11 @@ describe('mergeSettings', () => {
     expect(mergeSettings({ pageTranslationEngine: 'external' }).pageTranslationEngine).toBe(
       'external',
     )
+  })
+
+  it('validates the global automatic full-page setting', () => {
+    expect(mergeSettings({ autoPageTranslation: true }).autoPageTranslation).toBe(true)
+    expect(mergeSettings({ autoPageTranslation: 'yes' }).autoPageTranslation).toBe(false)
   })
 
   it('coerces non-string fields from storage', () => {

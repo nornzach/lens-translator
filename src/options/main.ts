@@ -14,6 +14,56 @@ import {
   type ProviderId,
   type ReasoningPref,
 } from '../shared/providers'
+import {
+  BrowserTranslator,
+  type BrowserTranslatorAvailability,
+} from '../content/browser-translator'
+
+const browserTranslator = new BrowserTranslator()
+let browserCapability: BrowserTranslatorAvailability = 'unsupported'
+let capabilityRequest = 0
+
+const LANGUAGE_OPTIONS = [
+  ['ar', '阿拉伯语'],
+  ['bg', '保加利亚语'],
+  ['bn', '孟加拉语'],
+  ['cs', '捷克语'],
+  ['da', '丹麦语'],
+  ['de', '德语'],
+  ['el', '希腊语'],
+  ['en', '英语'],
+  ['es', '西班牙语'],
+  ['fi', '芬兰语'],
+  ['fr', '法语'],
+  ['he', '希伯来语'],
+  ['hi', '印地语'],
+  ['hr', '克罗地亚语'],
+  ['hu', '匈牙利语'],
+  ['id', '印度尼西亚语'],
+  ['it', '意大利语'],
+  ['ja', '日语'],
+  ['kn', '卡纳达语'],
+  ['ko', '韩语'],
+  ['lt', '立陶宛语'],
+  ['mr', '马拉地语'],
+  ['nl', '荷兰语'],
+  ['no', '挪威语'],
+  ['pl', '波兰语'],
+  ['pt', '葡萄牙语'],
+  ['ro', '罗马尼亚语'],
+  ['ru', '俄语'],
+  ['sk', '斯洛伐克语'],
+  ['sl', '斯洛文尼亚语'],
+  ['sv', '瑞典语'],
+  ['ta', '泰米尔语'],
+  ['te', '泰卢固语'],
+  ['th', '泰语'],
+  ['tr', '土耳其语'],
+  ['uk', '乌克兰语'],
+  ['vi', '越南语'],
+  ['zh', '简体中文'],
+  ['zh-Hant', '繁体中文'],
+] as const
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id)
@@ -26,6 +76,31 @@ function parsePausedHostnames(raw: string): string[] {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
+}
+
+function populateLanguageSelects(): void {
+  for (const id of ['sourceLang', 'targetLang']) {
+    const select = el<HTMLSelectElement>(id)
+    select.replaceChildren(
+      ...LANGUAGE_OPTIONS.map(([code, name]) => {
+        const option = document.createElement('option')
+        option.value = code
+        option.textContent = `${name} · ${code}`
+        return option
+      }),
+    )
+  }
+}
+
+function setLanguageValue(id: 'sourceLang' | 'targetLang', value: string): void {
+  const select = el<HTMLSelectElement>(id)
+  if (![...select.options].some((option) => option.value === value)) {
+    const option = document.createElement('option')
+    option.value = value
+    option.textContent = `自定义 · ${value}`
+    select.append(option)
+  }
+  select.value = value
 }
 
 function hotkeyFieldId(prefix: string, field: string): string {
@@ -69,11 +144,12 @@ function fillForm(s: UserSettings): void {
     : 'sk-... 或供应商密钥'
   el<HTMLInputElement>('model').value = s.model
   el<HTMLSelectElement>('reasoningPref').value = s.reasoningPref
-  el<HTMLInputElement>('sourceLang').value = s.sourceLang
-  el<HTMLInputElement>('targetLang').value = s.targetLang
+  setLanguageValue('sourceLang', s.sourceLang)
+  setLanguageValue('targetLang', s.targetLang)
   el<HTMLInputElement>('autoTranslate').checked = s.autoTranslate
   el<HTMLSelectElement>('translationEngine').value = s.translationEngine
   el<HTMLSelectElement>('pageTranslationEngine').value = s.pageTranslationEngine
+  el<HTMLInputElement>('autoPageTranslation').checked = s.autoPageTranslation
   el<HTMLInputElement>('pageTranslationFontSizePx').value = String(
     s.pageTranslationFontSizePx,
   )
@@ -95,6 +171,7 @@ function fillForm(s: UserSettings): void {
   updateConfigBadge(s)
   updateProviderHint(s.provider)
   updateStyleControlStates()
+  updateEngineSummary(s)
 }
 
 function readForm(stored: UserSettings): UserSettings {
@@ -111,12 +188,13 @@ function readForm(stored: UserSettings): UserSettings {
     baseURL: el<HTMLInputElement>('baseURL').value.trim(),
     apiKey,
     model: el<HTMLInputElement>('model').value.trim(),
-    sourceLang: el<HTMLInputElement>('sourceLang').value.trim() || DEFAULT_SETTINGS.sourceLang,
-    targetLang: el<HTMLInputElement>('targetLang').value.trim() || DEFAULT_SETTINGS.targetLang,
+    sourceLang: el<HTMLSelectElement>('sourceLang').value || DEFAULT_SETTINGS.sourceLang,
+    targetLang: el<HTMLSelectElement>('targetLang').value || DEFAULT_SETTINGS.targetLang,
     autoTranslate: el<HTMLInputElement>('autoTranslate').checked,
     translationEngine: el<HTMLSelectElement>('translationEngine').value as TranslationEngine,
     pageTranslationEngine: el<HTMLSelectElement>('pageTranslationEngine')
       .value as TranslationEngine,
+    autoPageTranslation: el<HTMLInputElement>('autoPageTranslation').checked,
     pageTranslationFontSizePx: Number(
       el<HTMLInputElement>('pageTranslationFontSizePx').value,
     ),
@@ -181,6 +259,70 @@ function updateStyleControlStates(): void {
     !el<HTMLInputElement>('pageTranslationUseBackground').checked
 }
 
+function updateEngineSummary(settings: UserSettings): void {
+  const lens = settings.translationEngine === 'browser' ? 'Chrome' : '外部 LLM'
+  const page = settings.pageTranslationEngine === 'browser' ? 'Chrome' : '外部 LLM'
+  el<HTMLElement>('engineSummary').textContent = `透镜 ${lens} · 整页 ${page}`
+}
+
+function browserVersion(): string {
+  return navigator.userAgent.match(/(?:Chrome|Chromium)\/(\d+)/u)?.[1] ?? '未知'
+}
+
+function renderBrowserCapability(
+  availability: BrowserTranslatorAvailability | 'checking' | 'error',
+  detail?: string,
+): void {
+  const panel = el<HTMLElement>('browserCapability')
+  const title = el<HTMLElement>('browserCapabilityTitle')
+  const description = el<HTMLElement>('browserCapabilityDescription')
+  const action = el<HTMLButtonElement>('browserCapabilityAction')
+  panel.dataset.state = availability
+  action.hidden = availability === 'checking'
+  action.disabled = availability === 'checking'
+
+  const content = {
+    checking: ['正在检测 Chrome 内置翻译', '正在检查 API 和当前语言对。'],
+    available: ['Chrome 内置翻译已就绪', '当前语言对可直接在设备侧翻译。'],
+    downloadable: ['需要下载语言包', '点击下载并测试；完成后可自动翻译英文页面。'],
+    downloading: ['语言包正在下载', detail || '请保持此页面打开。'],
+    unavailable: ['当前语言对不可用', '可更换语言代码，或将对应翻译引擎切换为外部 LLM。'],
+    unsupported: [
+      '当前环境未提供 Translator API',
+      `检测到 Chrome/Chromium ${browserVersion()}。该能力要求桌面版 Chrome 138+，其他 Chromium 浏览器不保证支持。`,
+    ],
+    error: ['检测失败', detail || '请重新检测；持续失败时可改用外部 LLM。'],
+  } as const
+  title.textContent = content[availability][0]
+  description.textContent = detail || content[availability][1]
+  action.textContent =
+    availability === 'downloadable' || availability === 'downloading' ? '下载并测试' : '重新检测'
+}
+
+async function checkBrowserCapability(prepare = false): Promise<void> {
+  const request = ++capabilityRequest
+  const source = el<HTMLSelectElement>('sourceLang').value || DEFAULT_SETTINGS.sourceLang
+  const target = el<HTMLSelectElement>('targetLang').value || DEFAULT_SETTINGS.targetLang
+  renderBrowserCapability('checking')
+  try {
+    browserCapability = await browserTranslator.availability(source, target)
+    if (request !== capabilityRequest) return
+    if (prepare && (browserCapability === 'downloadable' || browserCapability === 'downloading')) {
+      renderBrowserCapability('downloading', '准备语言包…')
+      const ready = await browserTranslator.prepare(source, target, (progress) => {
+        if (request !== capabilityRequest) return
+        renderBrowserCapability('downloading', `语言包下载进度 ${Math.round(progress * 100)}%`)
+      })
+      if (request !== capabilityRequest) return
+      browserCapability = ready ? 'available' : 'unavailable'
+    }
+    renderBrowserCapability(browserCapability)
+  } catch (error) {
+    if (request !== capabilityRequest) return
+    renderBrowserCapability('error', error instanceof Error ? error.message : String(error))
+  }
+}
+
 function applyProviderPreset(id: string): void {
   const preset = PROVIDER_PRESETS.find((p) => p.id === id)
   if (!preset) return
@@ -239,9 +381,30 @@ function setupHotkeyCapture(prefix: string, buttonId: string, hintId: string): v
   })
 }
 
+function setupSectionNavigation(): void {
+  const links = [...document.querySelectorAll<HTMLAnchorElement>('.section-nav a')]
+  const sections = links
+    .map((link) => document.querySelector<HTMLElement>(link.hash))
+    .filter((section): section is HTMLElement => Boolean(section))
+  const observer = new IntersectionObserver(
+    (entries) => {
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0]
+      if (!visible) return
+      for (const link of links) link.classList.toggle('active', link.hash === `#${visible.target.id}`)
+    },
+    { rootMargin: '-20% 0px -65% 0px', threshold: [0, 0.2, 0.6] },
+  )
+  for (const section of sections) observer.observe(section)
+}
+
 async function init(): Promise<void> {
+  populateLanguageSelects()
   let stored = await loadSettings()
   fillForm(stored)
+  void checkBrowserCapability()
+  setupSectionNavigation()
   setupHotkeyCapture('hotkey', 'captureHotkey', 'captureHint')
   setupHotkeyCapture('pageHotkey', 'capturePageHotkey', 'capturePageHint')
   el<HTMLInputElement>('pageTranslationUseCustomColor').addEventListener(
@@ -252,6 +415,19 @@ async function init(): Promise<void> {
     'change',
     updateStyleControlStates,
   )
+  el<HTMLButtonElement>('browserCapabilityAction').addEventListener('click', () => {
+    void checkBrowserCapability(
+      browserCapability === 'downloadable' || browserCapability === 'downloading',
+    )
+  })
+  for (const id of ['sourceLang', 'targetLang']) {
+    el<HTMLSelectElement>(id).addEventListener('change', () => void checkBrowserCapability())
+  }
+  for (const id of ['translationEngine', 'pageTranslationEngine']) {
+    el<HTMLSelectElement>(id).addEventListener('change', () => {
+      updateEngineSummary(readForm(stored))
+    })
+  }
 
   el<HTMLSelectElement>('provider').addEventListener('change', () => {
     const v = el<HTMLSelectElement>('provider').value
@@ -280,13 +456,19 @@ async function init(): Promise<void> {
       await saveSettings(next)
       stored = await loadSettings()
       fillForm(stored)
-      if (
-        stored.translationEngine === 'browser' &&
-        stored.pageTranslationEngine === 'browser'
+      const usesBrowser =
+        stored.translationEngine === 'browser' || stored.pageTranslationEngine === 'browser'
+      if (usesBrowser && (browserCapability === 'unsupported' || browserCapability === 'unavailable')) {
+        setStatus('已保存，但当前 Chrome 内置翻译不可用；请查看能力诊断或改用外部 LLM。', false)
+      } else if (
+        usesBrowser &&
+        (browserCapability === 'downloadable' || browserCapability === 'downloading')
       ) {
-        setStatus('已保存 · 两种文本模式均使用 Chrome 内置翻译。请回到网页刷新后再试。', true)
+        setStatus('已保存 · 使用自动翻译前，请先在 Chrome 能力区下载语言包。', false)
       } else if (isConfigured(stored)) {
-        setStatus('已保存 · 配置有效。请回到网页刷新后再试快捷键。', true)
+        setStatus('已保存 · 已同步到打开的网页。', true)
+      } else if (!usesExternal) {
+        setStatus('已保存 · Chrome 内置翻译已就绪。', true)
       } else {
         setStatus('保存后校验失败，请重新填写 API Key 并保存。', false)
       }

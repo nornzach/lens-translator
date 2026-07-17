@@ -52,6 +52,12 @@ function renderStatus(settings: UserSettings): void {
     ? '开：进入页面会预译可见区（可能较慢）'
     : '关：仅透镜对准的块才翻译（推荐）'
 
+  const pageAuto = el<HTMLInputElement>('pageAutoToggle')
+  pageAuto.checked = settings.autoPageTranslation
+  el<HTMLElement>('pageAutoDesc').textContent = settings.autoPageTranslation
+    ? '开：识别到英文页面后自动开启'
+    : '关：使用快捷键手动开启'
+
   const label = formatHotkeyLabel(settings.hotkey)
   el<HTMLElement>('hotkeyHint').textContent = `${label}：按住临时显示 · 短按保持打开`
 
@@ -96,6 +102,7 @@ async function init(): Promise<void> {
   const hostnameEl = el<HTMLElement>('hostname')
   const pauseToggle = el<HTMLInputElement>('pauseToggle')
   const autoToggle = el<HTMLInputElement>('autoToggle')
+  const pageAutoToggle = el<HTMLInputElement>('pageAutoToggle')
 
   if (!hostname) {
     hostnameEl.textContent = '（无法读取此页）'
@@ -133,6 +140,24 @@ async function init(): Promise<void> {
       renderStatus(settings)
     } catch (err) {
       autoToggle.checked = !autoToggle.checked
+      const error = el<HTMLElement>('error')
+      error.hidden = false
+      error.textContent = err instanceof Error ? err.message : String(err)
+    }
+  })
+
+  pageAutoToggle.addEventListener('change', async () => {
+    try {
+      el<HTMLElement>('error').hidden = true
+      const next: UserSettings = {
+        ...settings,
+        autoPageTranslation: pageAutoToggle.checked,
+      }
+      await saveSettings(next)
+      settings = await loadSettings()
+      renderStatus(settings)
+    } catch (err) {
+      pageAutoToggle.checked = !pageAutoToggle.checked
       const error = el<HTMLElement>('error')
       error.hidden = false
       error.textContent = err instanceof Error ? err.message : String(err)

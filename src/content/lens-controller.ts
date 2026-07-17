@@ -19,6 +19,7 @@ import { ImageRegistry, type ImageTranslationEntry } from './image-registry'
 import { makePageKey } from './page-key'
 import { TranslationBatcher } from './translation-batcher'
 import { PageTranslator } from './page-translator'
+import { pageMatchesSourceLanguage } from './page-language'
 
 const TAP_STICKY_MS = 320
 
@@ -83,6 +84,7 @@ function translateSigOf(s: UserSettings, isConfiguredFlag: boolean): string {
     s.autoTranslate,
     s.translationEngine,
     s.pageTranslationEngine,
+    s.autoPageTranslation,
     s.pageTranslationFontSizePx,
     s.pageTranslationUseCustomColor,
     s.pageTranslationTextColor,
@@ -129,6 +131,7 @@ export class LensController {
   private configured = false
   private pausedHere = false
   private translateSettingsSig = ''
+  private autoPageStartPending = false
 
   // --- lens interaction state ---
   private lensActive = false
@@ -210,6 +213,7 @@ export class LensController {
         if (previousSig !== '') this.registry.resetErrorsToPending()
         if (this.settings.autoTranslate) void this.scanVisibleAndTranslate()
       }
+      if (this.settings.autoPageTranslation) await this.maybeStartPageTranslation()
     } catch (error) {
       console.warn(
         '[Lens Translator] settings refresh failed',
@@ -237,6 +241,33 @@ export class LensController {
     const pending = this.registry.pendingBlocks().filter((b) => !this.inflight.has(b.id))
     if (!pending.length) return
     await this.translateSpecific(pending)
+  }
+
+  async maybeStartPageTranslation(): Promise<void> {
+    if (
+      this.autoPageStartPending ||
+      this.pausedHere ||
+      !this.settings.autoPageTranslation ||
+      this.pageTranslator.isActive() ||
+      !pageMatchesSourceLanguage(this.settings.sourceLang)
+    ) {
+      return
+    }
+    if (this.settings.pageTranslationEngine === 'external' && !this.configured) return
+
+    this.autoPageStartPending = true
+    try {
+      if (this.settings.pageTranslationEngine === 'browser') {
+        const availability = await this.browserTranslator.availability(
+          this.settings.sourceLang,
+          this.settings.targetLang,
+        )
+        if (availability !== 'available') return
+      }
+      await this.pageTranslator.activate(this.settings, this.configured)
+    } finally {
+      this.autoPageStartPending = false
+    }
   }
 
   // -------------------------------------------------------------------------

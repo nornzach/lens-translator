@@ -28,6 +28,8 @@ export type UserSettings = {
   translationEngine: TranslationEngine
   /** Engine used by the full-page bilingual DOM translation mode. */
   pageTranslationEngine: TranslationEngine
+  /** Automatically enable full-page bilingual mode when the page is identified as English. */
+  autoPageTranslation: boolean
   pageTranslationFontSizePx: number
   pageTranslationUseCustomColor: boolean
   pageTranslationTextColor: string
@@ -57,6 +59,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   autoTranslate: false,
   translationEngine: 'external',
   pageTranslationEngine: 'browser',
+  autoPageTranslation: false,
   pageTranslationFontSizePx: 16,
   pageTranslationUseCustomColor: false,
   pageTranslationTextColor: '#0e7490',
@@ -148,6 +151,10 @@ export function mergeSettings(partial: unknown): UserSettings {
       p.pageTranslationEngine,
       DEFAULT_SETTINGS.pageTranslationEngine,
     ),
+    autoPageTranslation:
+      typeof p.autoPageTranslation === 'boolean'
+        ? p.autoPageTranslation
+        : DEFAULT_SETTINGS.autoPageTranslation,
     pageTranslationFontSizePx: finiteNumber(
       p.pageTranslationFontSizePx,
       DEFAULT_SETTINGS.pageTranslationFontSizePx,
