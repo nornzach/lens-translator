@@ -16,6 +16,11 @@ import {
 } from './extract'
 import { makePageKey } from './page-key'
 import { BrowserTranslator } from './browser-translator'
+import {
+  PAGE_ALIGNMENT_FALLBACK_ATTR,
+  PAGE_ALIGNMENT_HIGHLIGHT_NAME,
+  PageAlignmentController,
+} from './page-alignment'
 
 const TRANSLATED_ATTR = 'data-lens-page-translated'
 const TRANSLATION_TEXT_ATTR = 'data-lens-page-translation-text'
@@ -75,6 +80,18 @@ function pageStyles(settings: PageSettings): string {
   text-decoration: none !important;
   white-space: nowrap !important;
   opacity: 0.72 !important;
+}
+
+::highlight(${PAGE_ALIGNMENT_HIGHLIGHT_NAME}) {
+  background: rgb(250 204 21 / 52%);
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: rgb(202 138 4 / 80%);
+  text-decoration-thickness: 2px;
+}
+
+[${PAGE_ALIGNMENT_FALLBACK_ATTR}] {
+  background-color: rgb(250 204 21 / 22%) !important;
 }
 
 #${STATUS_ID} {
@@ -241,6 +258,7 @@ export class PageTranslator {
   private processedCount = 0
   private translatedCount = 0
   private totalCount = 0
+  private readonly alignment = new PageAlignmentController()
 
   constructor(private readonly browserTranslator: BrowserTranslator) {}
 
@@ -261,6 +279,7 @@ export class PageTranslator {
     this.generation++
     this.observer?.disconnect()
     this.observer = null
+    this.alignment.deactivate()
     this.observedRoots = new WeakSet<Node>()
     window.clearTimeout(this.statusTimer)
     window.clearTimeout(this.mutationTimer)
@@ -301,6 +320,7 @@ export class PageTranslator {
       return
     }
 
+    this.alignment.activate()
     this.startObserving()
     await this.scanAndTranslate(settings, generation, true)
   }
@@ -475,6 +495,14 @@ export class PageTranslator {
       host.setAttribute(TRANSLATION_TEXT_ATTR, translation)
       if (isPageUiTranslationCandidate(block)) host.setAttribute(UI_TRANSLATION_ATTR, '')
       this.translatedHosts.add(host)
+      this.alignment.register(
+        host,
+        block.text,
+        translation,
+        settings.sourceLang,
+        settings.targetLang,
+        isPageUiTranslationCandidate(block),
+      )
       this.translatedCount++
     }
   }
@@ -537,12 +565,14 @@ export class PageTranslator {
   private isOwnNode(node: Node): boolean {
     return (
       node.nodeType === 1 &&
-      ((node as Element).id === STYLE_ID ||
+      ((node as Element).hasAttribute('data-lens-ignore') ||
+        (node as Element).id === STYLE_ID ||
         (node as Element).id === STATUS_ID)
     )
   }
 
   private invalidateHost(host: Element): void {
+    this.alignment.unregister(host)
     host.removeAttribute(TRANSLATED_ATTR)
     host.removeAttribute(TRANSLATION_TEXT_ATTR)
     host.removeAttribute(UI_TRANSLATION_ATTR)
@@ -606,6 +636,7 @@ export class PageTranslator {
     this.active = false
     this.observer?.disconnect()
     this.observer = null
+    this.alignment.deactivate()
     this.showStatus(message, true)
     this.scheduleStatusRemoval(5000)
   }
