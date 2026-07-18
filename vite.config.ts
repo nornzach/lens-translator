@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import { crx } from '@crxjs/vite-plugin'
+import { resolve } from 'node:path'
 import manifest from './manifest.config'
 
 export default defineConfig({
@@ -8,6 +9,9 @@ export default defineConfig({
     sourcemap: true,
     // Stable, distinct names reduce CRX entry mix-ups between SW and content
     rollupOptions: {
+      input: {
+        bubble: resolve(__dirname, 'src/bubble/index.html'),
+      },
       output: {
         entryFileNames: 'assets/[name]-[hash].js',
         chunkFileNames: 'assets/[name]-[hash].js',

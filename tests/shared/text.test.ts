@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   normalizeText,
   isPageTranslatableText,
+  isPredominantlyTargetLanguage,
   isTranslatableText,
 } from '../../src/shared/text'
 
@@ -21,6 +22,22 @@ describe('isTranslatableText', () => {
   })
   it('accepts normal sentences', () => {
     expect(isTranslatableText('Modern tools make immersion easier.', 10)).toBe(true)
+  })
+})
+
+describe('isPredominantlyTargetLanguage', () => {
+  it('skips Chinese-dominant text when Chinese is the target', () => {
+    expect(isPredominantlyTargetLanguage('这是一段已经翻译好的中文内容。', 'zh')).toBe(true)
+    expect(isPredominantlyTargetLanguage('使用 GPT-5 生成中文摘要', 'zh-Hant')).toBe(true)
+  })
+
+  it('keeps English and genuinely mixed source text translatable', () => {
+    expect(isPredominantlyTargetLanguage('Modern tools make immersion easier.', 'zh')).toBe(false)
+    expect(isPredominantlyTargetLanguage('Translate this English sentence 中文', 'zh')).toBe(false)
+  })
+
+  it('does not guess between Latin-script languages', () => {
+    expect(isPredominantlyTargetLanguage('This is already English.', 'en')).toBe(false)
   })
 })
 

@@ -53,6 +53,7 @@ export type ContentSettings = Pick<
   | 'translationEngine'
   | 'pageTranslationEngine'
   | 'autoPageTranslation'
+  | 'pageTranslationFontFamily'
   | 'pageTranslationFontSizePx'
   | 'pageTranslationUseCustomColor'
   | 'pageTranslationTextColor'
@@ -108,6 +109,19 @@ export type TestConnectionResult =
 export type TogglePageTranslationMsg = { type: 'toggle-page-translation' }
 export type TogglePageTranslationResult =
   | { ok: true }
+  | { ok: false; error: string }
+
+export type BubbleControlMsg = {
+  type: 'bubble-control'
+  command: 'get-state' | 'toggle-page-translation' | 'toggle-lens'
+}
+
+export type BubbleControlResult =
+  | {
+      ok: true
+      lensActive: boolean
+      pageTranslationActive: boolean
+    }
   | { ok: false; error: string }
 
 export type BackgroundErrorResult = {

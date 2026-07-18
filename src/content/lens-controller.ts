@@ -3,6 +3,8 @@ import { makeBlockId } from '../shared/block-id'
 import type { UserSettings } from '../shared/settings-defaults'
 import { DEFAULT_SETTINGS, mergeSettings } from '../shared/settings-defaults'
 import type {
+  BubbleControlMsg,
+  BubbleControlResult,
   SettingsMsg,
   TranslateBatchResultErr,
   TranslateBatchResultOk,
@@ -11,7 +13,7 @@ import type {
   TranslateImageResultOk,
   TogglePageTranslationResult,
 } from '../shared/messages'
-import { normalizeText } from '../shared/text'
+import { isPredominantlyTargetLanguage, normalizeText } from '../shared/text'
 import { coarsePath, extractBlockAtElement, extractVisibleBlocks } from './extract'
 import { BlockRegistry } from './registry'
 import { LensOverlay } from './lens'
@@ -115,6 +117,7 @@ export function pageTranslationSigOf(s: UserSettings, isConfiguredFlag: boolean)
  */
 function pageStyleSigOf(s: UserSettings): string {
   return [
+    s.pageTranslationFontFamily,
     s.pageTranslationFontSizePx,
     s.pageTranslationUseCustomColor,
     s.pageTranslationTextColor,
@@ -211,46 +214,21 @@ export class LensController {
       if (area === 'local' && changes.settings) void this.refreshSettings()
     })
 
-    // Popup “翻译此页” button drives the same toggle as the page hotkey.
+    // Popup and floating controls drive the same state transitions as hotkeys.
     chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
-      if (
-        sender.id === chrome.runtime.id &&
-        message &&
-        typeof message === 'object' &&
-        (message as { type?: unknown }).type === 'toggle-page-translation'
-      ) {
-        if (this.pausedHere) {
-          const result: TogglePageTranslationResult = {
-            ok: false,
-            error: '当前网站已暂停翻译',
-          }
-          sendResponse(result)
-          return false
-        }
-        if (this.settings.pageTranslationEngine === 'external' && !this.configured) {
-          const result: TogglePageTranslationResult = {
-            ok: false,
-            error: '整页翻译需要先配置外部 API',
-          }
-          sendResponse(result)
-          return false
-        }
-        if (
-          this.settings.pageTranslationEngine === 'browser' &&
-          !this.browserTranslator.isSupported()
-        ) {
-          const result: TogglePageTranslationResult = {
-            ok: false,
-            error: '当前浏览器不支持 Chrome 内置翻译',
-          }
-          sendResponse(result)
-          return false
-        }
-        if (this.lensActive) this.deactivateLens()
-        void this.pageTranslator.toggle(this.settings, this.configured)
-        const result: TogglePageTranslationResult = { ok: true }
-        sendResponse(result)
-        return false
+      if (sender.id !== chrome.runtime.id || !message || typeof message !== 'object') return false
+      const type = (message as { type?: unknown }).type
+      if (type === 'toggle-page-translation') {
+        void this.togglePageTranslation().then(sendResponse, (error: unknown) => {
+          sendResponse(controlError(error))
+        })
+        return true
+      }
+      if (type === 'bubble-control' && isBubbleControlMessage(message)) {
+        void this.handleBubbleControl(message).then(sendResponse, (error: unknown) => {
+          sendResponse(controlError(error))
+        })
+        return true
       }
       return false
     })
@@ -275,6 +253,8 @@ export class LensController {
       }
       this.lens.setWidth(this.settings.lensWidthPx)
       this.lens.setFontSize(this.settings.pageTranslationFontSizePx)
+      this.lens.setFontFamily(this.settings.pageTranslationFontFamily)
+      this.lens.setAppearance(this.settings)
 
       const lensSig = lensTranslationSigOf(this.settings, this.configured)
       const lensChanged = lensSig !== this.lensSettingsSig
@@ -328,6 +308,43 @@ export class LensController {
     }
   }
 
+  async togglePageTranslation(): Promise<TogglePageTranslationResult> {
+    if (this.pageTranslator.isActive()) {
+      this.pageTranslator.deactivate()
+      return { ok: true }
+    }
+    const error = this.pageTranslationError()
+    if (error) return { ok: false, error }
+    if (this.lensActive) this.deactivateLens()
+    await this.pageTranslator.toggle(this.settings, this.configured)
+    return { ok: true }
+  }
+
+  toggleStickyLens(): BubbleControlResult {
+    if (this.lensActive) {
+      this.deactivateLens()
+      return this.bubbleState()
+    }
+    if (this.pausedHere) return { ok: false, error: '当前网站已暂停翻译' }
+    if (!this.canTranslateText()) {
+      return {
+        ok: false,
+        error:
+          this.settings.translationEngine === 'browser'
+            ? '当前浏览器不支持 Chrome 内置翻译'
+            : '透镜翻译需要先配置外部 API',
+      }
+    }
+    this.lensActive = true
+    this.lensSticky = true
+    this.ensureMouseSeed()
+    if (this.settings.translationEngine === 'browser') {
+      void this.browserTranslator.prepare(this.settings.sourceLang, this.settings.targetLang)
+    }
+    this.updateLens()
+    return this.bubbleState()
+  }
+
   async scanVisibleAndTranslate(): Promise<void> {
     if (this.pausedHere || !this.settings.autoTranslate || !this.canTranslateText()) return
     const margin = Math.round(window.innerHeight * this.settings.prefetchMarginRatio)
@@ -335,7 +352,13 @@ export class LensController {
     for (const b of blocks) {
       this.registry.upsert({ id: b.id, el: b.el, tag: b.tag, text: b.text })
     }
-    const pending = this.registry.pendingBlocks().filter((b) => !this.inflight.has(b.id))
+    const pending = this.registry
+      .pendingBlocks()
+      .filter(
+        (block) =>
+          !this.inflight.has(block.id) &&
+          !isPredominantlyTargetLanguage(block.text, this.settings.targetLang),
+      )
     if (!pending.length) return
     await this.translateSpecific(pending)
   }
@@ -412,8 +435,7 @@ export class LensController {
       }
       e.preventDefault()
       e.stopPropagation()
-      if (this.lensActive) this.deactivateLens()
-      void this.pageTranslator.toggle(this.settings, this.configured)
+      void this.togglePageTranslation()
       return
     }
     if (!matchesHotkey(e, this.settings.hotkey)) return
@@ -468,7 +490,15 @@ export class LensController {
   }
 
   private readonly onMouseMove = (e: MouseEvent): void => {
-    if (e.composedPath().includes(this.lens.getHost())) return
+    const path = e.composedPath()
+    if (
+      path.includes(this.lens.getHost()) ||
+      path.some(
+        (item) => item instanceof Element && item.id === 'lens-translator-bubble-root',
+      )
+    ) {
+      return
+    }
     this.lastMouse = { x: e.clientX, y: e.clientY }
     if (!this.lensActive || this.pointerFrame) return
     this.pointerFrame = requestAnimationFrame(() => {
@@ -548,6 +578,12 @@ export class LensController {
     if (!entry) {
       this.lens.showAt(this.lastMouse.x, this.lastMouse.y, { kind: 'empty' })
       this.lens.highlight(null)
+      return
+    }
+
+    if (isPredominantlyTargetLanguage(entry.text, this.settings.targetLang)) {
+      this.lens.showAt(this.lastMouse.x, this.lastMouse.y, { kind: 'target-language' })
+      this.lens.highlight(entry.el)
       return
     }
 
@@ -660,6 +696,7 @@ export class LensController {
     const seenText = new Set<string>()
 
     for (const b of blocks) {
+      if (isPredominantlyTargetLanguage(b.text, this.settings.targetLang)) continue
       const e = this.registry.get(b.id)
       if (!e) continue
       if (e.status === 'ready' && e.translation) continue
@@ -736,6 +773,35 @@ export class LensController {
       : this.configured
   }
 
+  private pageTranslationError(): string | null {
+    if (this.pausedHere) return '当前网站已暂停翻译'
+    if (this.settings.pageTranslationEngine === 'external' && !this.configured) {
+      return '整页翻译需要先配置外部 API'
+    }
+    if (
+      this.settings.pageTranslationEngine === 'browser' &&
+      !this.browserTranslator.isSupported()
+    ) {
+      return '当前浏览器不支持 Chrome 内置翻译'
+    }
+    return null
+  }
+
+  private bubbleState(): BubbleControlResult {
+    return {
+      ok: true,
+      lensActive: this.lensActive,
+      pageTranslationActive: this.pageTranslator.isActive(),
+    }
+  }
+
+  private async handleBubbleControl(message: BubbleControlMsg): Promise<BubbleControlResult> {
+    if (message.command === 'get-state') return this.bubbleState()
+    if (message.command === 'toggle-lens') return this.toggleStickyLens()
+    const result = await this.togglePageTranslation()
+    return result.ok ? this.bubbleState() : result
+  }
+
   private imageEntryForHit(hit: Element | null): ImageTranslationEntry | undefined {
     if (!(hit instanceof HTMLImageElement)) return undefined
     if (!hit.complete || hit.naturalWidth < 2 || hit.naturalHeight < 2) return undefined
@@ -752,6 +818,19 @@ export class LensController {
     if (h.metaKey && (e.code === 'MetaLeft' || e.code === 'MetaRight')) return true
     return false
   }
+}
+
+function isBubbleControlMessage(value: object): value is BubbleControlMsg {
+  if (!('command' in value)) return false
+  return (
+    value.command === 'get-state' ||
+    value.command === 'toggle-page-translation' ||
+    value.command === 'toggle-lens'
+  )
+}
+
+function controlError(error: unknown): { ok: false; error: string } {
+  return { ok: false, error: error instanceof Error ? error.message : String(error) }
 }
 
 // ---------------------------------------------------------------------------

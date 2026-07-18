@@ -17,5 +17,11 @@ export {
   mergeSettings,
   isConfigured,
   missingConfigFields,
+  apiBaseUrlError,
 } from './settings-defaults'
-export type { UserSettings, HotkeyConfig, TranslationEngine } from './settings-defaults'
+export type {
+  UserSettings,
+  HotkeyConfig,
+  TranslationEngine,
+  TranslationFontFamily,
+} from './settings-defaults'

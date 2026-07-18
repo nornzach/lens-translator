@@ -1,4 +1,5 @@
 import { LensController } from './lens-controller'
+import { FloatingBubbleHost } from './floating-bubble'
 
 // Guard against double-mount: on install/update the worker re-injects this script
 // into already-open tabs (see sw.ts), which can race with the manifest injection.
@@ -9,6 +10,8 @@ async function main(): Promise<void> {
   if (globalScope[MOUNT_FLAG]) return
   globalScope[MOUNT_FLAG] = true
   const controller = new LensController(340)
+  const bubble = new FloatingBubbleHost()
+  bubble.mount()
   controller.bindListeners()
   controller.ensureMouseSeed()
   // refreshSettings() already kicks off the initial scan when auto-translate is on,

@@ -9,6 +9,7 @@ export type HotkeyConfig = {
 }
 
 export type TranslationEngine = 'external' | 'browser'
+export type TranslationFontFamily = 'system' | 'sans' | 'serif' | 'mono'
 
 export type UserSettings = {
   baseURL: string
@@ -30,6 +31,7 @@ export type UserSettings = {
   pageTranslationEngine: TranslationEngine
   /** Automatically enable full-page bilingual mode when the page is identified as English. */
   autoPageTranslation: boolean
+  pageTranslationFontFamily: TranslationFontFamily
   pageTranslationFontSizePx: number
   pageTranslationUseCustomColor: boolean
   pageTranslationTextColor: string
@@ -60,6 +62,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   translationEngine: 'external',
   pageTranslationEngine: 'browser',
   autoPageTranslation: false,
+  pageTranslationFontFamily: 'system',
   pageTranslationFontSizePx: 14,
   pageTranslationUseCustomColor: false,
   pageTranslationTextColor: '#0e7490',
@@ -101,6 +104,12 @@ function asReasoningPref(v: unknown): ReasoningPref {
 
 function asTranslationEngine(v: unknown, fallback: TranslationEngine): TranslationEngine {
   return v === 'browser' || v === 'external' ? v : fallback
+}
+
+function asTranslationFontFamily(value: unknown): TranslationFontFamily {
+  return value === 'sans' || value === 'serif' || value === 'mono' || value === 'system'
+    ? value
+    : DEFAULT_SETTINGS.pageTranslationFontFamily
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -155,6 +164,7 @@ export function mergeSettings(partial: unknown): UserSettings {
       typeof p.autoPageTranslation === 'boolean'
         ? p.autoPageTranslation
         : DEFAULT_SETTINGS.autoPageTranslation,
+    pageTranslationFontFamily: asTranslationFontFamily(p.pageTranslationFontFamily),
     pageTranslationFontSizePx: finiteNumber(
       p.pageTranslationFontSizePx,
       DEFAULT_SETTINGS.pageTranslationFontSizePx,

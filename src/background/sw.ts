@@ -93,6 +93,7 @@ function settingsForContent(settings: UserSettings, hostname = ''): SettingsMsg 
     translationEngine,
     pageTranslationEngine,
     autoPageTranslation,
+    pageTranslationFontFamily,
     pageTranslationFontSizePx,
     pageTranslationUseCustomColor,
     pageTranslationTextColor,
@@ -117,6 +118,7 @@ function settingsForContent(settings: UserSettings, hostname = ''): SettingsMsg 
       translationEngine,
       pageTranslationEngine,
       autoPageTranslation,
+      pageTranslationFontFamily,
       pageTranslationFontSizePx,
       pageTranslationUseCustomColor,
       pageTranslationTextColor,
@@ -328,9 +330,9 @@ async function handle(
   }
 
   if (message.type === 'test-connection') {
-    // Only the extension's own pages (no originating tab) may supply an arbitrary
-    // endpoint/key; otherwise a content script could turn the worker into a fetch proxy.
-    if (sender.tab) {
+    // Only extension-origin pages may supply an arbitrary endpoint/key. This also
+    // permits the isolated floating controller iframe embedded in a normal tab.
+    if (!sender.url?.startsWith(chrome.runtime.getURL(''))) {
       return { type: 'test-connection-result', ok: false, error: '仅设置页可发起连通性测试' }
     }
     const stored = await loadSettings()

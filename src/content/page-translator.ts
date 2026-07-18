@@ -5,7 +5,11 @@ import type {
   TranslateBlock,
 } from '../shared/messages'
 import type { UserSettings } from '../shared/settings-defaults'
-import { isPageTranslatableText, normalizeText } from '../shared/text'
+import {
+  isPageTranslatableText,
+  isPredominantlyTargetLanguage,
+  normalizeText,
+} from '../shared/text'
 import {
   collectPageRoots,
   elementText,
@@ -61,6 +65,12 @@ function pageStyles(settings: PageSettings): string {
   const radius = settings.pageTranslationUseBackground ? '4px' : '0'
   const opacity =
     settings.pageTranslationUseCustomColor || settings.pageTranslationUseBackground ? '1' : '0.78'
+  const fontFamily = {
+    system: 'inherit',
+    sans: 'Inter, ui-sans-serif, system-ui, sans-serif',
+    serif: 'Georgia, "Times New Roman", serif',
+    mono: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
+  }[settings.pageTranslationFontFamily]
 
   return `
 [${TRANSLATED_ATTR}]::after {
@@ -73,7 +83,7 @@ function pageStyles(settings: PageSettings): string {
   border-radius: ${radius} !important;
   background: ${background} !important;
   color: ${color} !important;
-  font-family: inherit !important;
+  font-family: ${fontFamily} !important;
   font-size: ${settings.pageTranslationFontSizePx}px !important;
   font-style: ${settings.pageTranslationItalic ? 'italic' : 'normal'} !important;
   font-weight: ${settings.pageTranslationBold ? '700' : '400'} !important;
@@ -174,6 +184,7 @@ type PageSettings = Pick<
   | 'sourceLang'
   | 'targetLang'
   | 'pageTranslationEngine'
+  | 'pageTranslationFontFamily'
   | 'pageTranslationFontSizePx'
   | 'pageTranslationUseCustomColor'
   | 'pageTranslationTextColor'
@@ -465,6 +476,7 @@ export class PageTranslator {
       const blocks = [...blocksByElement.values()].filter((block) => {
         if (this.volatileHosts.has(block.el)) return false
         if (!isPageTranslationCandidate(block, settings.minTextLength)) return false
+        if (isPredominantlyTargetLanguage(block.text, settings.targetLang)) return false
         if (this.translatedHosts.has(block.el)) return false
         return this.attemptedTextByHost.get(block.el) !== block.text
       })

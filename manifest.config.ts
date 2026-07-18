@@ -4,7 +4,7 @@ export default defineManifest({
   manifest_version: 3,
   name: 'Lens Translator',
   description: 'Hold a hotkey to peek Chinese translations without leaving English immersion.',
-  version: '0.2.0',
+  version: '0.3.0',
   action: {
     default_popup: 'src/popup/index.html',
     default_title: 'Lens Translator',
@@ -27,4 +27,10 @@ export default defineManifest({
   ],
   permissions: ['storage', 'tabs', 'scripting'],
   host_permissions: ['http://*/*', 'https://*/*'],
+  web_accessible_resources: [
+    {
+      resources: ['src/bubble/index.html'],
+      matches: ['http://*/*', 'https://*/*'],
+    },
+  ],
 })

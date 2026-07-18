@@ -15,6 +15,7 @@ describe('DEFAULT_SETTINGS', () => {
     expect(DEFAULT_SETTINGS.translationEngine).toBe('external')
     expect(DEFAULT_SETTINGS.pageTranslationEngine).toBe('browser')
     expect(DEFAULT_SETTINGS.autoPageTranslation).toBe(false)
+    expect(DEFAULT_SETTINGS.pageTranslationFontFamily).toBe('system')
     expect(DEFAULT_SETTINGS.pageTranslationFontSizePx).toBe(14)
     expect(DEFAULT_SETTINGS.pageTranslationUseCustomColor).toBe(false)
     expect(DEFAULT_SETTINGS.pageTranslationUseBackground).toBe(false)
@@ -98,6 +99,15 @@ describe('mergeSettings', () => {
     expect(merged.pageTranslationBold).toBe(true)
     expect(merged.pageTranslationItalic).toBe(true)
     expect(merged.pageTranslationUnderline).toBe(true)
+  })
+
+  it('accepts only known translation font families', () => {
+    expect(mergeSettings({ pageTranslationFontFamily: 'serif' }).pageTranslationFontFamily).toBe(
+      'serif',
+    )
+    expect(mergeSettings({ pageTranslationFontFamily: 'comic' }).pageTranslationFontFamily).toBe(
+      DEFAULT_SETTINGS.pageTranslationFontFamily,
+    )
   })
 })
 

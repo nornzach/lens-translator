@@ -14,6 +14,7 @@ export type LensViewState =
       sourceRect?: DOMRect
     }
   | { kind: 'empty' }
+  | { kind: 'target-language' }
   | {
       kind: 'error'
       message: string
@@ -21,6 +22,16 @@ export type LensViewState =
       sourceRect?: DOMRect
     }
   | { kind: 'unconfigured' }
+
+type LensAppearance = {
+  pageTranslationUseCustomColor: boolean
+  pageTranslationTextColor: string
+  pageTranslationUseBackground: boolean
+  pageTranslationBackgroundColor: string
+  pageTranslationBold: boolean
+  pageTranslationItalic: boolean
+  pageTranslationUnderline: boolean
+}
 
 /**
  * Liquid-glass lens: bilingual EN/ZH panel placed **beside** the source
@@ -151,6 +162,35 @@ export class LensOverlay {
     this.host.style.setProperty('--lens-en-size', `${base + 0.5}px`)
   }
 
+  setFontFamily(fontFamily: 'system' | 'sans' | 'serif' | 'mono'): void {
+    const stack = {
+      system: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif",
+      sans: 'Inter, ui-sans-serif, system-ui, sans-serif',
+      serif: "Georgia, 'Times New Roman', serif",
+      mono: "'SFMono-Regular', Consolas, 'Liberation Mono', monospace",
+    }[fontFamily]
+    this.host.style.setProperty('--lens-font-family', stack)
+  }
+
+  setAppearance(settings: LensAppearance): void {
+    this.host.style.setProperty(
+      '--lens-target-color',
+      settings.pageTranslationUseCustomColor ? settings.pageTranslationTextColor : 'rgba(0, 0, 0, 0.92)',
+    )
+    this.host.style.setProperty(
+      '--lens-target-background',
+      settings.pageTranslationUseBackground ? settings.pageTranslationBackgroundColor : 'transparent',
+    )
+    this.host.style.setProperty('--lens-target-padding', settings.pageTranslationUseBackground ? '6px 8px' : '0')
+    this.host.style.setProperty('--lens-target-radius', settings.pageTranslationUseBackground ? '4px' : '0')
+    this.host.style.setProperty('--lens-target-weight', settings.pageTranslationBold ? '700' : '520')
+    this.host.style.setProperty('--lens-target-style', settings.pageTranslationItalic ? 'italic' : 'normal')
+    this.host.style.setProperty(
+      '--lens-target-decoration',
+      settings.pageTranslationUnderline ? 'underline' : 'none',
+    )
+  }
+
   /** Render one state, then place the selectable panel outside the highlighted source. */
   showAt(
     clientX: number,
@@ -171,7 +211,8 @@ export class LensOverlay {
     this.sourceLabel.hidden = !showSource
     this.sourceBody.hidden = !showSource
     this.divider.hidden = !showSource
-    this.zhLabel.hidden = state.kind === 'empty' || state.kind === 'unconfigured'
+    this.zhLabel.hidden =
+      state.kind === 'empty' || state.kind === 'target-language' || state.kind === 'unconfigured'
 
     if (showSource) {
       this.sourceBody.textContent = sourceText
@@ -196,6 +237,14 @@ export class LensOverlay {
         this.zhLabel.hidden = true
         this.body.classList.add('muted')
         this.body.textContent = '此处无可译文本（请移到文字上）'
+        break
+      case 'target-language':
+        this.sourceLabel.hidden = true
+        this.sourceBody.hidden = true
+        this.divider.hidden = true
+        this.zhLabel.hidden = true
+        this.body.classList.add('muted')
+        this.body.textContent = '此段已是目标语言'
         break
       case 'error':
         this.zhLabel.textContent = '中文'
@@ -395,7 +444,7 @@ const LENS_STYLES = `
       0 2px 8px rgba(0, 0, 0, 0.08),
       0 0 0 0.5px rgba(255, 255, 255, 0.8);
     transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-    font: 16px/1.55 -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+    font: 16px/1.55 var(--lens-font-family, -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif);
     -webkit-font-smoothing: antialiased;
     color: rgba(0, 0, 0, 0.92);
   }
@@ -515,8 +564,13 @@ const LENS_STYLES = `
 
   .body-zh {
     font-size: var(--lens-zh-size, 16.5px);
-    color: rgba(0, 0, 0, 0.92);
-    font-weight: 520;
+    color: var(--lens-target-color, rgba(0, 0, 0, 0.92));
+    background: var(--lens-target-background, transparent);
+    padding: var(--lens-target-padding, 0);
+    border-radius: var(--lens-target-radius, 0);
+    font-weight: var(--lens-target-weight, 520);
+    font-style: var(--lens-target-style, normal);
+    text-decoration: var(--lens-target-decoration, none);
   }
 
   .body.muted {
