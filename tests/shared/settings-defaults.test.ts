@@ -15,7 +15,7 @@ describe('DEFAULT_SETTINGS', () => {
     expect(DEFAULT_SETTINGS.translationEngine).toBe('external')
     expect(DEFAULT_SETTINGS.pageTranslationEngine).toBe('browser')
     expect(DEFAULT_SETTINGS.autoPageTranslation).toBe(false)
-    expect(DEFAULT_SETTINGS.pageTranslationFontSizePx).toBe(16)
+    expect(DEFAULT_SETTINGS.pageTranslationFontSizePx).toBe(14)
     expect(DEFAULT_SETTINGS.pageTranslationUseCustomColor).toBe(false)
     expect(DEFAULT_SETTINGS.pageTranslationUseBackground).toBe(false)
     expect(DEFAULT_SETTINGS.lensWidthPx).toBe(320)
@@ -48,7 +48,7 @@ describe('mergeSettings', () => {
     expect(merged.pageTranslationEngine).toBe('browser')
     expect(merged.autoPageTranslation).toBe(false)
     expect(merged.pageTranslationHotkey).toEqual(DEFAULT_SETTINGS.pageTranslationHotkey)
-    expect(merged.pageTranslationFontSizePx).toBe(16)
+    expect(merged.pageTranslationFontSizePx).toBe(14)
     expect(merged.model).toBe(DEFAULT_SETTINGS.model)
   })
 

@@ -6,7 +6,11 @@ import {
   type UserSettings,
 } from '../shared/settings'
 import { formatHotkeyLabel } from '../shared/hotkey'
-import type { PauseHostnameMsg } from '../shared/messages'
+import type {
+  PauseHostnameMsg,
+  TogglePageTranslationMsg,
+  TogglePageTranslationResult,
+} from '../shared/messages'
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id)
@@ -86,10 +90,45 @@ async function setHostnamePaused(hostname: string, paused: boolean): Promise<Use
     paused,
   }
   const response: unknown = await chrome.runtime.sendMessage(msg)
+  if (
+    response &&
+    typeof response === 'object' &&
+    'type' in response &&
+    response.type === 'background-error' &&
+    'error' in response &&
+    typeof response.error === 'string'
+  ) {
+    throw new Error(response.error)
+  }
   if (!response || typeof response !== 'object' || !('type' in response) || response.type !== 'settings') {
     throw new Error('更新暂停状态失败')
   }
   return loadSettings()
+}
+
+/** Toggle full-page translation in the active tab, injecting the script if the tab predates install. */
+async function togglePageTranslation(tabId: number): Promise<void> {
+  const message: TogglePageTranslationMsg = { type: 'toggle-page-translation' }
+  let response: unknown
+  try {
+    response = await chrome.tabs.sendMessage(tabId, message)
+  } catch {
+    const files = (chrome.runtime.getManifest().content_scripts ?? []).flatMap((s) => s.js ?? [])
+    if (!files.length) throw new Error('无法在此页面运行')
+    await chrome.scripting.executeScript({ target: { tabId }, files })
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    response = await chrome.tabs.sendMessage(tabId, message)
+  }
+  if (!isTogglePageTranslationResult(response)) {
+    throw new Error('页面翻译脚本未返回有效结果')
+  }
+  if (!response.ok) throw new Error(response.error)
+}
+
+function isTogglePageTranslationResult(value: unknown): value is TogglePageTranslationResult {
+  if (!value || typeof value !== 'object' || !('ok' in value)) return false
+  if (value.ok === true) return true
+  return value.ok === false && 'error' in value && typeof value.error === 'string'
 }
 
 async function init(): Promise<void> {
@@ -103,6 +142,24 @@ async function init(): Promise<void> {
   const pauseToggle = el<HTMLInputElement>('pauseToggle')
   const autoToggle = el<HTMLInputElement>('autoToggle')
   const pageAutoToggle = el<HTMLInputElement>('pageAutoToggle')
+
+  const translatePageBtn = el<HTMLButtonElement>('translatePage')
+  if (tab?.id === undefined || !hostname) {
+    translatePageBtn.disabled = true
+  } else {
+    const tabId = tab.id
+    translatePageBtn.addEventListener('click', async () => {
+      try {
+        el<HTMLElement>('error').hidden = true
+        await togglePageTranslation(tabId)
+        window.close()
+      } catch (err) {
+        const error = el<HTMLElement>('error')
+        error.hidden = false
+        error.textContent = err instanceof Error ? err.message : String(err)
+      }
+    })
+  }
 
   if (!hostname) {
     hostnameEl.textContent = '（无法读取此页）'

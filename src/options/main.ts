@@ -18,6 +18,7 @@ import {
   BrowserTranslator,
   type BrowserTranslatorAvailability,
 } from '../content/browser-translator'
+import type { TestConnectionResult } from '../shared/messages'
 
 const browserTranslator = new BrowserTranslator()
 let browserCapability: BrowserTranslatorAvailability = 'unsupported'
@@ -222,6 +223,46 @@ function setStatus(text: string, ok = true): void {
   const node = el<HTMLElement>('status')
   node.textContent = text
   node.classList.toggle('status-error', !ok)
+}
+
+function setTestStatus(text: string, state: 'testing' | 'ok' | 'error'): void {
+  const node = el<HTMLElement>('testConnectionStatus')
+  node.textContent = text
+  node.dataset.state = state
+}
+
+function isTestConnectionResult(value: unknown): value is TestConnectionResult {
+  if (!value || typeof value !== 'object') return false
+  const result = value as { type?: unknown; ok?: unknown; error?: unknown }
+  if (result.type !== 'test-connection-result') return false
+  return result.ok === true || (result.ok === false && typeof result.error === 'string')
+}
+
+/** Probe the currently entered endpoint/model/key (may be unsaved) via the background. */
+async function runConnectionTest(settings: UserSettings): Promise<void> {
+  const button = el<HTMLButtonElement>('testConnection')
+  button.disabled = true
+  setTestStatus('正在测试连接…', 'testing')
+  try {
+    const response: unknown = await chrome.runtime.sendMessage({
+      type: 'test-connection',
+      baseURL: settings.baseURL,
+      apiKey: settings.apiKey,
+      model: settings.model,
+      provider: settings.provider,
+      reasoningPref: settings.reasoningPref,
+    })
+    if (isTestConnectionResult(response) && response.ok) {
+      setTestStatus('连接成功 · 接口可正常翻译', 'ok')
+    } else {
+      const error = isTestConnectionResult(response) && !response.ok ? response.error : '未知错误'
+      setTestStatus(`连接失败：${error}`, 'error')
+    }
+  } catch (err) {
+    setTestStatus(`连接失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+  } finally {
+    button.disabled = false
+  }
 }
 
 function updateConfigBadge(s: UserSettings): void {
@@ -475,6 +516,10 @@ async function init(): Promise<void> {
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err), false)
     }
+  })
+
+  el<HTMLButtonElement>('testConnection').addEventListener('click', () => {
+    void runConnectionTest(readForm(stored))
   })
 
   el<HTMLButtonElement>('reset').addEventListener('click', async () => {

@@ -60,7 +60,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   translationEngine: 'external',
   pageTranslationEngine: 'browser',
   autoPageTranslation: false,
-  pageTranslationFontSizePx: 16,
+  pageTranslationFontSizePx: 14,
   pageTranslationUseCustomColor: false,
   pageTranslationTextColor: '#0e7490',
   pageTranslationUseBackground: false,

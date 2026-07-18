@@ -87,16 +87,49 @@ export type PauseHostnameMsg = {
 
 export type OpenOptionsMsg = { type: 'open-options' }
 
+/**
+ * Options-page-only reachability probe. Carries the credentials currently typed
+ * into the form (which may be unsaved) so the user can verify before saving; the
+ * background rejects it unless it originates from a trusted extension page.
+ */
+export type TestConnectionMsg = {
+  type: 'test-connection'
+  baseURL: string
+  apiKey: string
+  model: string
+  provider: UserSettings['provider']
+  reasoningPref: UserSettings['reasoningPref']
+}
+
+export type TestConnectionResult =
+  | { type: 'test-connection-result'; ok: true }
+  | { type: 'test-connection-result'; ok: false; error: string }
+
+export type TogglePageTranslationMsg = { type: 'toggle-page-translation' }
+export type TogglePageTranslationResult =
+  | { ok: true }
+  | { ok: false; error: string }
+
+export type BackgroundErrorResult = {
+  type: 'background-error'
+  ok: false
+  requestType: ToBackground['type']
+  error: string
+}
+
 export type ToBackground =
   | TranslateBatchRequestMsg
   | TranslateImageRequestMsg
   | GetSettingsMsg
   | PauseHostnameMsg
   | OpenOptionsMsg
+  | TestConnectionMsg
 export type FromBackground =
   | TranslateBatchResultOk
   | TranslateBatchResultErr
   | TranslateImageResultOk
   | TranslateImageResultErr
   | SettingsMsg
+  | TestConnectionResult
+  | BackgroundErrorResult
   | { type: 'open-options-result'; ok: boolean }

@@ -140,6 +140,17 @@ export class LensOverlay {
     this.applyWidth()
   }
 
+  /**
+   * Scale the lens body text off the shared page-translation font-size setting so
+   * the lens and full-page modes stay visually consistent. The offsets reproduce
+   * the original 16.5px / 14.5px look at the default 14px setting.
+   */
+  setFontSize(fontSizePx: number): void {
+    const base = Math.max(10, Math.min(28, fontSizePx))
+    this.host.style.setProperty('--lens-zh-size', `${base + 2.5}px`)
+    this.host.style.setProperty('--lens-en-size', `${base + 0.5}px`)
+  }
+
   /** Render one state, then place the selectable panel outside the highlighted source. */
   showAt(
     clientX: number,
@@ -332,9 +343,23 @@ export class LensOverlay {
     this.positionRing(el)
   }
 
+  /** Re-place the ring on the currently highlighted element (e.g. after scroll). */
+  reposition(): void {
+    if (this.highlightEl) this.positionRing(this.highlightEl)
+  }
+
   private positionRing(el: Element): void {
+    if (!el.isConnected) {
+      this.ring.style.display = 'none'
+      return
+    }
     const r = el.getBoundingClientRect()
-    if (r.width < 1 || r.height < 1) {
+    const offscreen =
+      r.bottom <= 0 ||
+      r.right <= 0 ||
+      r.top >= window.innerHeight ||
+      r.left >= window.innerWidth
+    if (r.width < 1 || r.height < 1 || offscreen) {
       this.ring.style.display = 'none'
       return
     }
@@ -475,21 +500,21 @@ const LENS_STYLES = `
   .body {
     white-space: pre-wrap;
     word-break: break-word;
-    font-size: 16.5px;
+    font-size: var(--lens-zh-size, 16.5px);
     line-height: 1.55;
     color: rgba(0, 0, 0, 0.92);
     font-weight: 520;
   }
 
   .body-en {
-    font-size: 14.5px;
+    font-size: var(--lens-en-size, 14.5px);
     line-height: 1.5;
     color: rgba(0, 0, 0, 0.55);
     font-weight: 450;
   }
 
   .body-zh {
-    font-size: 16.5px;
+    font-size: var(--lens-zh-size, 16.5px);
     color: rgba(0, 0, 0, 0.92);
     font-weight: 520;
   }

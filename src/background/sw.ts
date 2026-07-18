@@ -1,4 +1,4 @@
-import { loadSettings, saveSettings, isConfigured } from '../shared/settings'
+import { loadSettings, saveSettings, isConfigured, missingConfigFields } from '../shared/settings'
 import type { UserSettings } from '../shared/settings'
 import type {
   FromBackground,
@@ -9,8 +9,11 @@ import type {
 import {
   filterUncachedByText,
   expandTranslationsToAllIds,
-  translateAllBlocks,
+  translateBlocksSingleFlight,
   translateImage,
+  testConnection,
+  ensureCacheHydrated,
+  persistTranslationCache,
 } from './translate'
 
 chrome.runtime.onMessage.addListener((rawMessage: unknown, sender, sendResponse) => {
@@ -18,9 +21,68 @@ chrome.runtime.onMessage.addListener((rawMessage: unknown, sender, sendResponse)
     sendResponse({ type: 'translate-batch-result', ok: false, error: 'invalid message' })
     return false
   }
-  void handle(rawMessage, sender).then(sendResponse)
+  void handle(rawMessage, sender).then(sendResponse, (error: unknown) => {
+    sendResponse(errorResponse(rawMessage, error))
+  })
   return true
 })
+
+function errorResponse(message: ToBackground, error: unknown): FromBackground {
+  const detail = error instanceof Error ? error.message : String(error)
+  if (message.type === 'translate-batch') {
+    return {
+      type: 'translate-batch-result',
+      ok: false,
+      error: detail,
+      failedIds: message.blocks.map((block) => block.id),
+    }
+  }
+  if (message.type === 'translate-image') {
+    return { type: 'translate-image-result', ok: false, error: detail }
+  }
+  if (message.type === 'test-connection') {
+    return { type: 'test-connection-result', ok: false, error: detail }
+  }
+  if (message.type === 'open-options') {
+    return { type: 'open-options-result', ok: false }
+  }
+  return {
+    type: 'background-error',
+    ok: false,
+    requestType: message.type,
+    error: detail,
+  }
+}
+
+// Content scripts declared in the manifest only load on navigation, so tabs open
+// before first install stay untranslatable until reloaded. Inject into them once.
+chrome.runtime.onInstalled.addListener((details) => {
+  // Updating cannot safely tear down content scripts from the previous version.
+  // Existing tabs receive the new script on their next navigation.
+  if (details.reason === 'install') void injectIntoOpenTabs()
+})
+
+async function injectIntoOpenTabs(): Promise<void> {
+  const files = (chrome.runtime.getManifest().content_scripts ?? []).flatMap((s) => s.js ?? [])
+  if (!files.length) return
+  let tabs: chrome.tabs.Tab[]
+  try {
+    tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] })
+  } catch {
+    return
+  }
+  for (const tab of tabs) {
+    if (tab.id === undefined) continue
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files,
+      })
+    } catch {
+      // Restricted pages (Web Store, PDF viewer, other extensions) reject injection.
+    }
+  }
+}
 
 /** The only settings shape allowed to cross from the trusted background boundary. */
 function settingsForContent(settings: UserSettings, hostname = ''): SettingsMsg {
@@ -138,6 +200,24 @@ function isToBackground(value: unknown): value is ToBackground {
     }
     return true
   }
+  if (value.type === 'test-connection') {
+    return (
+      typeof value.baseURL === 'string' &&
+      value.baseURL.length <= 2048 &&
+      typeof value.apiKey === 'string' &&
+      value.apiKey.length <= 512 &&
+      typeof value.model === 'string' &&
+      value.model.length <= 256 &&
+      (value.provider === 'auto' ||
+        value.provider === 'openai' ||
+        value.provider === 'deepseek' ||
+        value.provider === 'stepfun') &&
+      (value.reasoningPref === 'off' ||
+        value.reasoningPref === 'low' ||
+        value.reasoningPref === 'medium' ||
+        value.reasoningPref === 'high')
+    )
+  }
   return false
 }
 
@@ -191,6 +271,7 @@ async function handle(
       }
     }
 
+    await ensureCacheHydrated()
     const { cached, missing, textHashToIds, idToText } = filterUncachedByText(
       message.pageKey,
       settings.sourceLang,
@@ -202,7 +283,13 @@ async function handle(
       return { type: 'translate-batch-result', ok: true, translations: cached }
     }
 
-    const result = await translateAllBlocks(missing, settings)
+    const result = await translateBlocksSingleFlight(
+      message.pageKey,
+      settings.sourceLang,
+      settings.targetLang,
+      missing,
+      settings,
+    )
     const expanded = expandTranslationsToAllIds(
       message.pageKey,
       settings.sourceLang,
@@ -211,6 +298,7 @@ async function handle(
       idToText,
       textHashToIds,
     )
+    if (result.translations.length) await persistTranslationCache()
     const translations = [...cached, ...expanded]
 
     if (result.ok) {
@@ -237,6 +325,31 @@ async function handle(
       failedIds: [...failedSet],
       translations,
     }
+  }
+
+  if (message.type === 'test-connection') {
+    // Only the extension's own pages (no originating tab) may supply an arbitrary
+    // endpoint/key; otherwise a content script could turn the worker into a fetch proxy.
+    if (sender.tab) {
+      return { type: 'test-connection-result', ok: false, error: '仅设置页可发起连通性测试' }
+    }
+    const stored = await loadSettings()
+    const probe: UserSettings = {
+      ...stored,
+      baseURL: message.baseURL.trim(),
+      apiKey: message.apiKey.trim() || stored.apiKey,
+      model: message.model.trim(),
+      provider: message.provider,
+      reasoningPref: message.reasoningPref,
+    }
+    const missing = missingConfigFields(probe)
+    if (missing.length) {
+      return { type: 'test-connection-result', ok: false, error: `请先填写 ${missing.join('、')}` }
+    }
+    const result = await testConnection(probe)
+    return result.ok
+      ? { type: 'test-connection-result', ok: true }
+      : { type: 'test-connection-result', ok: false, error: result.error }
   }
 
   return { type: 'translate-batch-result', ok: false, error: 'unknown message' }

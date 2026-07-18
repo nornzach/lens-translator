@@ -114,12 +114,13 @@ export class BlockRegistry {
       .map((e) => ({ id: e.id, tag: e.tag, text: e.text }))
   }
 
-  resetErrorsToPending(): void {
-    for (const e of this.byId.values()) {
-      if (e.status === 'error') {
-        e.status = 'pending'
-        e.error = undefined
-      }
+  /** Invalidate ready/error results after the language pair or engine changes. */
+  resetTranslationsToPending(): void {
+    this.byNormText.clear()
+    for (const entry of this.byId.values()) {
+      entry.status = 'pending'
+      entry.translation = undefined
+      entry.error = undefined
     }
   }
 

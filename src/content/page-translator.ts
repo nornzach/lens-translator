@@ -8,6 +8,7 @@ import type { UserSettings } from '../shared/settings-defaults'
 import { isPageTranslatableText, normalizeText } from '../shared/text'
 import {
   collectPageRoots,
+  elementText,
   extractPageBlocks,
   isUiLabelElement,
   isVisible,
@@ -29,6 +30,25 @@ const UI_STACKED_TRANSLATION_ATTR = 'data-lens-page-ui-stacked-translation'
 const UI_CONTROL_TRANSLATION_ATTR = 'data-lens-page-ui-control-translation'
 const STYLE_ID = 'lens-translator-page-style'
 const STATUS_ID = 'lens-translator-page-status'
+
+// A translated host that keeps mutating (clocks, counters, live chat) would loop
+// forever between invalidate and re-translate. After this many re-invalidations
+// within the window we give up on it and leave the original text in place.
+const VOLATILE_CHURN_LIMIT = 3
+const VOLATILE_CHURN_WINDOW_MS = 5000
+
+// How many translate-batch requests may be in flight at once for one full-page
+// run. Each maps to a separate background fetch, so this is real HTTP parallelism
+// while staying low enough to avoid provider rate limits.
+const PAGE_TRANSLATION_CONCURRENCY = 4
+
+// When translation starts before dynamic content has rendered (SPA hydration,
+// async data), keep observing and retrying the initial scan for this long before
+// declaring the page empty, instead of failing on the first blank scan.
+const INITIAL_CONTENT_GRACE_MS = 8000
+const INITIAL_RETRY_INTERVAL_MS = 600
+
+type ChurnRecord = { count: number; since: number }
 
 function pageStyles(settings: PageSettings): string {
   const color = settings.pageTranslationUseCustomColor
@@ -70,7 +90,8 @@ function pageStyles(settings: PageSettings): string {
 
 [${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}]::after {
   content: " · " attr(${TRANSLATION_TEXT_ATTR}) !important;
-  display: inline !important;
+  display: inline-block !important;
+  vertical-align: baseline !important;
   margin: 0 0 0 0.32em !important;
   padding: 0 !important;
   border: 0 !important;
@@ -96,7 +117,8 @@ function pageStyles(settings: PageSettings): string {
 
 [${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}][${UI_CONTROL_TRANSLATION_ATTR}]::after {
   content: " · " attr(${TRANSLATION_TEXT_ATTR}) !important;
-  display: inline !important;
+  display: inline-block !important;
+  vertical-align: baseline !important;
   margin-left: 0.3em !important;
   font-size: 0.7em !important;
   line-height: inherit !important;
@@ -233,6 +255,24 @@ const PAGE_UI_CHROME_SELECTOR =
 const PAGE_CONTROL_SELECTOR =
   'button, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="option"]'
 
+/**
+ * Interactive grid/chart widgets (calendars, heatmaps, spreadsheets) pack short labels into
+ * fixed-size cells. Appending an inline translation there overflows the cell and breaks the
+ * layout (e.g. the GitHub contribution graph), so full-page mode leaves their text untouched.
+ * This also covers the graph *legend* ("Less [][][][] More"), whose level swatches live outside
+ * the grid and would otherwise get "没低中高" crammed on top of each tiny square.
+ */
+const PAGE_LAYOUT_LOCKED_SELECTOR =
+  '[role="grid"], [role="treegrid"], [class*="ContributionCalendar"], .js-calendar-graph, .contrib-legend, [class*="ContributionCalendar"] [data-level], .js-calendar-graph [data-level]'
+
+/** Month / weekday axis tokens: near-zero translation value, high layout risk in charts & calendars. */
+const DATE_AXIS_LABEL_RE =
+  /^(?:mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)$/i
+
+function isDateAxisLabel(text: string): boolean {
+  return DATE_AXIS_LABEL_RE.test(normalizeText(text))
+}
+
 export function isPageUiTranslationCandidate(block: ExtractedBlock): boolean {
   return Boolean(
     isUiLabelElement(block.el) ||
@@ -255,7 +295,7 @@ export function pageTranslationHost(block: ExtractedBlock): Element {
   for (const candidate of block.el.querySelectorAll('*')) {
     const tag = candidate.tagName.toLowerCase()
     if (tag === 'svg' || tag === 'path' || tag === 'img') continue
-    if (normalizeText(candidate.textContent ?? '') === text) host = candidate
+    if (normalizeText(elementText(candidate)) === text) host = candidate
   }
   return host
 }
@@ -267,6 +307,9 @@ export function isPageTranslationCandidate(
 ): boolean {
   const { el, text } = block
   if (el.closest('time')) return false
+  // Data-visualization widgets and bare date-axis labels break layout or add no value.
+  if (el.closest(PAGE_LAYOUT_LOCKED_SELECTOR)) return false
+  if (isDateAxisLabel(text)) return false
   const isUi = isPageUiTranslationCandidate(block)
   if (isUi && /@[\p{L}\p{N}_-]+/u.test(text)) return false
   if (!isPageTranslatableText(text, isUi ? Math.min(2, minTextLength) : minTextLength)) {
@@ -276,7 +319,7 @@ export function isPageTranslationCandidate(
   if (isUiLabelElement(el)) return false
 
   const link = el.closest('a, [role="link"]')
-  if (link && text.length <= 48 && normalizeText(link.textContent ?? '') === normalizeText(text)) {
+  if (link && text.length <= 48 && normalizeText(elementText(link)) === normalizeText(text)) {
     return false
   }
   return true
@@ -288,7 +331,9 @@ export class PageTranslator {
   private generation = 0
   private statusTimer = 0
   private mutationTimer = 0
-  private processing = false
+  private initialRetryTimer = 0
+  private activationDeadline = 0
+  private processingGeneration = 0
   private rescanRequested = false
   private observer: MutationObserver | null = null
   private observedRoots = new WeakSet<Node>()
@@ -298,6 +343,8 @@ export class PageTranslator {
   private readonly sourceHosts = new Map<Element, string | null>()
   private attemptedTextByHost = new WeakMap<Element, string>()
   private sourceBlockByHost = new WeakMap<Element, Element>()
+  private volatileHosts = new WeakSet<Element>()
+  private hostChurn = new WeakMap<Element, ChurnRecord>()
   private readonly translationCache = new Map<string, string>()
   private processedCount = 0
   private translatedCount = 0
@@ -327,6 +374,7 @@ export class PageTranslator {
     this.observedRoots = new WeakSet<Node>()
     window.clearTimeout(this.statusTimer)
     window.clearTimeout(this.mutationTimer)
+    window.clearTimeout(this.initialRetryTimer)
     for (const host of this.translatedHosts) {
       host.removeAttribute(TRANSLATED_ATTR)
       host.removeAttribute(TRANSLATION_TEXT_ATTR)
@@ -342,13 +390,26 @@ export class PageTranslator {
     this.sourceHosts.clear()
     this.attemptedTextByHost = new WeakMap<Element, string>()
     this.sourceBlockByHost = new WeakMap<Element, Element>()
+    this.volatileHosts = new WeakSet<Element>()
+    this.hostChurn = new WeakMap<Element, ChurnRecord>()
     this.translationCache.clear()
     this.dirtyRoots.clear()
     this.currentSettings = null
-    this.processing = false
+    this.processingGeneration = 0
     this.rescanRequested = false
     document.getElementById(STATUS_ID)?.remove()
     document.getElementById(STYLE_ID)?.remove()
+  }
+
+  /**
+   * Re-apply appearance-only settings (font size, colors, weight…) without
+   * tearing down the active translation. Injected CSS uses `content: attr(...)`,
+   * so re-writing the stylesheet restyles every rendered translation in place.
+   */
+  restyle(settings: PageSettings): void {
+    if (!this.active) return
+    this.currentSettings = settings
+    this.ensureStyles(settings)
   }
 
   async activate(settings: PageSettings, externalConfigured: boolean): Promise<void> {
@@ -369,6 +430,7 @@ export class PageTranslator {
 
     this.alignment.activate()
     this.startObserving()
+    this.activationDeadline = Date.now() + INITIAL_CONTENT_GRACE_MS
     await this.scanAndTranslate(settings, generation, true)
   }
 
@@ -378,11 +440,12 @@ export class PageTranslator {
     initial = false,
   ): Promise<void> {
     if (!this.isCurrent(generation)) return
-    if (this.processing) {
+    if (this.processingGeneration === generation) {
       this.rescanRequested = true
       return
     }
-    this.processing = true
+    if (this.processingGeneration !== 0) return
+    this.processingGeneration = generation
     window.clearTimeout(this.statusTimer)
 
     try {
@@ -400,6 +463,7 @@ export class PageTranslator {
         }
       }
       const blocks = [...blocksByElement.values()].filter((block) => {
+        if (this.volatileHosts.has(block.el)) return false
         if (!isPageTranslationCandidate(block, settings.minTextLength)) return false
         if (this.translatedHosts.has(block.el)) return false
         return this.attemptedTextByHost.get(block.el) !== block.text
@@ -410,8 +474,19 @@ export class PageTranslator {
       this.translatedCount = 0
 
       if (!groups.length) {
-        if (initial) this.failActivation('当前页面没有可翻译文本')
-        else document.getElementById(STATUS_ID)?.remove()
+        if (initial && this.translatedHosts.size === 0) {
+          // Content may not have rendered yet. Keep the observer running (so late
+          // content is picked up immediately) and retry the initial scan until the
+          // grace window elapses, only then declaring the page empty.
+          if (Date.now() < this.activationDeadline) {
+            this.showStatus('正在等待页面内容加载…')
+            this.scheduleInitialRetry(generation)
+          } else {
+            this.failActivation('当前页面没有可翻译文本')
+          }
+        } else {
+          document.getElementById(STATUS_ID)?.remove()
+        }
         return
       }
       if (!initial) this.showStatus('检测到新内容，正在翻译…')
@@ -464,7 +539,8 @@ export class PageTranslator {
         this.scheduleStatusRemoval(5000)
       }
     } finally {
-      this.processing = false
+      if (this.processingGeneration !== generation) return
+      this.processingGeneration = 0
       if (this.rescanRequested && this.isCurrent(generation)) {
         this.rescanRequested = false
         this.scheduleScan(0)
@@ -505,28 +581,69 @@ export class PageTranslator {
       settings.batchCharLimit,
       30,
     )
+    const pageKey = makePageKey()
+    let firstError: string | null = null
 
-    for (const batch of batches) {
+    // Batches run concurrently (bounded) instead of one-at-a-time; every batch is
+    // an independent request keyed by block id, so order does not matter.
+    const runBatch = async (batch: TranslateBlock[]): Promise<void> => {
       if (!this.isCurrent(generation)) return
-      const response: unknown = await chrome.runtime.sendMessage({
-        type: 'translate-batch',
-        pageKey: makePageKey(),
-        blocks: batch,
-      })
-      if (!this.isCurrent(generation)) return
-      if (!isTranslateBatchResult(response)) throw new Error('翻译服务未返回有效结果')
+      try {
+        const response: unknown = await chrome.runtime.sendMessage({
+          type: 'translate-batch',
+          pageKey,
+          blocks: batch,
+        })
+        if (!this.isCurrent(generation)) return
+        if (!isTranslateBatchResult(response)) throw new Error('翻译服务未返回有效结果')
 
-      for (const item of response.translations ?? []) {
-        const group = byRepresentativeId.get(item.id)
-        if (group) this.renderGroup(group, item.translation, settings)
+        for (const item of response.translations ?? []) {
+          const group = byRepresentativeId.get(item.id)
+          if (group) {
+            this.renderGroup(group, item.translation, settings)
+          }
+        }
+        if (!response.ok) {
+          if (firstError === null) firstError = response.error
+        }
+      } catch (error) {
+        if (firstError === null) {
+          firstError = error instanceof Error ? error.message : String(error)
+        }
       }
+
+      if (!this.isCurrent(generation)) return
       for (const block of batch) {
         const group = byRepresentativeId.get(block.id)
         if (group) this.processedCount += group.blocks.length
       }
       this.updateProgress()
-      if (!response.ok) throw new Error(response.error)
     }
+
+    await this.runWithConcurrency(batches, PAGE_TRANSLATION_CONCURRENCY, runBatch)
+    if (!this.isCurrent(generation)) return
+    // External and on-device engines are intentionally isolated; surface any remaining gap.
+    if (firstError !== null && groups.some((g) => !this.translationCache.has(g.representative.text))) {
+      throw new Error(firstError)
+    }
+  }
+
+  /** Run `worker` over `items` with at most `limit` in flight; never rejects per item. */
+  private async runWithConcurrency<T>(
+    items: T[],
+    limit: number,
+    worker: (item: T) => Promise<void>,
+  ): Promise<void> {
+    const queue = items.slice()
+    const runNext = async (): Promise<void> => {
+      const item = queue.shift()
+      if (item === undefined) return
+      await worker(item)
+      await runNext()
+    }
+    const runners: Promise<void>[] = []
+    for (let i = 0; i < Math.min(limit, items.length); i++) runners.push(runNext())
+    await Promise.all(runners)
   }
 
   private renderGroup(group: TranslationGroup, translation: string, settings: PageSettings): void {
@@ -610,16 +727,37 @@ export class PageTranslator {
       if (translatedHost && record.type === 'attributes') continue
       if (translatedHost) {
         const source = translatedHost.getAttribute(PAGE_SOURCE_ATTR) ?? ''
-        if (normalizeText(translatedHost.textContent ?? '') === source) continue
+        if (normalizeText(elementText(translatedHost)) === source) continue
+        if (this.markChurnAndMaybeVolatile(translatedHost)) {
+          // Host changes too often to be worth translating: restore the original
+          // text and stop tracking it so we never loop on it again.
+          this.invalidateHost(translatedHost)
+          continue
+        }
         this.invalidateHost(translatedHost)
-        this.dirtyRoots.add(translatedHost)
+        this.dirtyRoots.add(translatedHost.parentElement ?? translatedHost)
         relevant = true
         continue
       }
-      this.dirtyRoots.add(target)
+      this.dirtyRoots.add(target.parentElement ?? target)
       relevant = true
     }
     if (relevant) this.scheduleScan()
+  }
+
+  private markChurnAndMaybeVolatile(host: Element): boolean {
+    const now = Date.now()
+    const record = this.hostChurn.get(host)
+    if (!record || now - record.since > VOLATILE_CHURN_WINDOW_MS) {
+      this.hostChurn.set(host, { count: 1, since: now })
+      return false
+    }
+    record.count++
+    if (record.count < VOLATILE_CHURN_LIMIT) return false
+    this.volatileHosts.add(host)
+    const sourceBlock = this.sourceBlockByHost.get(host)
+    if (sourceBlock) this.volatileHosts.add(sourceBlock)
+    return true
   }
 
   private isOwnNode(node: Node): boolean {
@@ -662,6 +800,14 @@ export class PageTranslator {
     }, delay)
   }
 
+  private scheduleInitialRetry(generation: number): void {
+    window.clearTimeout(this.initialRetryTimer)
+    this.initialRetryTimer = window.setTimeout(() => {
+      if (!this.isCurrent(generation) || !this.currentSettings) return
+      void this.scanAndTranslate(this.currentSettings, generation, true)
+    }, INITIAL_RETRY_INTERVAL_MS)
+  }
+
   private isCurrent(generation: number): boolean {
     return this.active && generation === this.generation
   }
@@ -697,6 +843,7 @@ export class PageTranslator {
 
   private failActivation(message: string): void {
     this.active = false
+    window.clearTimeout(this.initialRetryTimer)
     this.observer?.disconnect()
     this.observer = null
     this.alignment.deactivate()

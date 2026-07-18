@@ -164,7 +164,7 @@
             <div class="setting-row appearance-row">
               <div class="setting-copy">
                 <h3>译文样式</h3>
-                <p>正文译文使用这些设置；紧凑菜单会自动采用更小的行内样式。</p>
+                <p>字号同时调整翻译透镜；颜色和字形用于正文译文，紧凑菜单会自动缩小。</p>
               </div>
               <div class="control appearance-controls">
                 <label class="number-field">
@@ -352,6 +352,16 @@
                   <option value="medium">中</option>
                   <option value="high">高</option>
                 </select>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>连通性测试</h3>
+                <p>使用当前填写的接口、模型和密钥发送一次最小请求，验证是否可用。</p>
+              </div>
+              <div class="control test-connection-control">
+                <button type="button" id="testConnection" class="button secondary">测试连接</button>
+                <span id="testConnectionStatus" class="test-connection-status" role="status" aria-live="polite"></span>
               </div>
             </div>
           </section>

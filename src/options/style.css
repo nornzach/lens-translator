@@ -717,6 +717,26 @@ input[type='color'] {
   color: var(--danger);
 }
 
+.test-connection-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.test-connection-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.test-connection-status[data-state='ok'] {
+  color: var(--success);
+}
+
+.test-connection-status[data-state='error'] {
+  color: var(--danger);
+}
+
 @media (max-width: 860px) {
   .workspace {
     display: block;

@@ -58,6 +58,19 @@ export class TranslationCache {
     this.totalChars = 0
   }
 
+  /** Snapshot entries in LRU order (oldest first) for persistence. */
+  entries(): [string, string][] {
+    return [...this.map.entries()]
+  }
+
+  /** Replace contents from a persisted snapshot; capacity limits still apply. */
+  load(entries: Iterable<[string, string]>): void {
+    this.clear()
+    for (const [key, value] of entries) {
+      if (typeof key === 'string' && typeof value === 'string') this.set(key, value)
+    }
+  }
+
 
   private evict(): void {
     while (

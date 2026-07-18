@@ -9,6 +9,7 @@ import type {
   TranslateBlock,
   TranslateImageResultErr,
   TranslateImageResultOk,
+  TogglePageTranslationResult,
 } from '../shared/messages'
 import { normalizeText } from '../shared/text'
 import { coarsePath, extractBlockAtElement, extractVisibleBlocks } from './extract'
@@ -76,15 +77,44 @@ function isSettingsMessage(value: unknown): value is SettingsMsg {
   return 'apiKey' in value.settings && value.settings.apiKey === ''
 }
 
-function translateSigOf(s: UserSettings, isConfiguredFlag: boolean): string {
+function backgroundError(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null
+  if (!('type' in value) || value.type !== 'background-error') return null
+  return 'error' in value && typeof value.error === 'string' ? value.error : null
+}
+
+/**
+ * Signature of settings that require re-translating the page (language pair,
+ * engine, thresholds). A change here tears down and rebuilds the run.
+ */
+export function lensTranslationSigOf(s: UserSettings, isConfiguredFlag: boolean): string {
   return [
-    isConfiguredFlag,
+    s.translationEngine === 'external' ? isConfiguredFlag : true,
     s.sourceLang,
     s.targetLang,
-    s.autoTranslate,
     s.translationEngine,
+    s.minTextLength,
+    s.batchCharLimit,
+  ].join('\0')
+}
+
+export function pageTranslationSigOf(s: UserSettings, isConfiguredFlag: boolean): string {
+  return [
+    s.pageTranslationEngine === 'external' ? isConfiguredFlag : true,
+    s.sourceLang,
+    s.targetLang,
     s.pageTranslationEngine,
-    s.autoPageTranslation,
+    s.minTextLength,
+    s.batchCharLimit,
+  ].join('\0')
+}
+
+/**
+ * Signature of appearance-only settings (font size, colors, weight…). A change
+ * here just re-injects the stylesheet, keeping translations in place.
+ */
+function pageStyleSigOf(s: UserSettings): string {
+  return [
     s.pageTranslationFontSizePx,
     s.pageTranslationUseCustomColor,
     s.pageTranslationTextColor,
@@ -93,20 +123,7 @@ function translateSigOf(s: UserSettings, isConfiguredFlag: boolean): string {
     s.pageTranslationBold,
     s.pageTranslationItalic,
     s.pageTranslationUnderline,
-    formatHotkeySig(s.pageTranslationHotkey),
-    s.minTextLength,
-    s.batchCharLimit,
   ].join('\0')
-}
-
-function formatHotkeySig(hotkey: UserSettings['hotkey']): string {
-  return [
-    hotkey.altKey,
-    hotkey.shiftKey,
-    hotkey.ctrlKey,
-    hotkey.metaKey,
-    hotkey.code,
-  ].join(':')
 }
 
 // ---------------------------------------------------------------------------
@@ -130,8 +147,12 @@ export class LensController {
   settings: UserSettings = DEFAULT_SETTINGS
   private configured = false
   private pausedHere = false
-  private translateSettingsSig = ''
+  private lensSettingsSig = ''
+  private pageSettingsSig = ''
+  private pageStyleSig = ''
   private autoPageStartPending = false
+  private settingsGeneration = 0
+  private translationGeneration = 0
 
   // --- lens interaction state ---
   private lensActive = false
@@ -141,13 +162,14 @@ export class LensController {
 
   // --- in-flight dedup ---
   /** In-flight block ids — avoid duplicate API calls for the same block. */
-  private readonly inflight = new Set<string>()
+  private readonly inflight = new Map<string, number>()
   /** In-flight normalized texts — identical sentences share one request. */
-  private readonly inflightTexts = new Set<string>()
+  private readonly inflightTexts = new Map<string, number>()
   private readonly imageInflight = new Set<string>()
 
   // --- rAF + bind guard ---
   private pointerFrame = 0
+  private stickyFrame = 0
   private listenersBound = false
 
   constructor(lensWidthPx = 340) {
@@ -173,6 +195,11 @@ export class LensController {
     window.addEventListener('scroll', scheduleScan, true)
     window.addEventListener('resize', scheduleScan)
 
+    // A pinned (sticky) lens must keep its highlight ring aligned with the source
+    // element as the page scrolls; the ring lives in a fixed overlay otherwise.
+    window.addEventListener('scroll', this.onStickyReposition, true)
+    window.addEventListener('resize', this.onStickyReposition)
+
     const mo = new MutationObserver(
       debounce(() => {
         if (this.settings.autoTranslate) void this.scanVisibleAndTranslate()
@@ -183,35 +210,105 @@ export class LensController {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === 'local' && changes.settings) void this.refreshSettings()
     })
+
+    // Popup “翻译此页” button drives the same toggle as the page hotkey.
+    chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
+      if (
+        sender.id === chrome.runtime.id &&
+        message &&
+        typeof message === 'object' &&
+        (message as { type?: unknown }).type === 'toggle-page-translation'
+      ) {
+        if (this.pausedHere) {
+          const result: TogglePageTranslationResult = {
+            ok: false,
+            error: '当前网站已暂停翻译',
+          }
+          sendResponse(result)
+          return false
+        }
+        if (this.settings.pageTranslationEngine === 'external' && !this.configured) {
+          const result: TogglePageTranslationResult = {
+            ok: false,
+            error: '整页翻译需要先配置外部 API',
+          }
+          sendResponse(result)
+          return false
+        }
+        if (
+          this.settings.pageTranslationEngine === 'browser' &&
+          !this.browserTranslator.isSupported()
+        ) {
+          const result: TogglePageTranslationResult = {
+            ok: false,
+            error: '当前浏览器不支持 Chrome 内置翻译',
+          }
+          sendResponse(result)
+          return false
+        }
+        if (this.lensActive) this.deactivateLens()
+        void this.pageTranslator.toggle(this.settings, this.configured)
+        const result: TogglePageTranslationResult = { ok: true }
+        sendResponse(result)
+        return false
+      }
+      return false
+    })
   }
 
   /** Refresh only redacted settings; the API key never enters the content-script world. */
   async refreshSettings(): Promise<void> {
     try {
       const response: unknown = await chrome.runtime.sendMessage({ type: 'get-settings' })
+      const responseError = backgroundError(response)
+      if (responseError) throw new Error(responseError)
       if (!isSettingsMessage(response)) throw new Error('Invalid settings response')
 
+      const previousSettings = this.settings
       this.configured = response.configured
       this.settings = mergeSettings(response.settings)
+      this.settingsGeneration++
       this.pausedHere = response.paused
       if (this.pausedHere) {
         if (this.lensActive) this.deactivateLens()
         if (this.pageTranslator.isActive()) this.pageTranslator.deactivate()
       }
       this.lens.setWidth(this.settings.lensWidthPx)
+      this.lens.setFontSize(this.settings.pageTranslationFontSizePx)
 
-      const sig = translateSigOf(this.settings, this.configured)
-      const changed = sig !== this.translateSettingsSig
-      const previousSig = this.translateSettingsSig
-      this.translateSettingsSig = sig
+      const lensSig = lensTranslationSigOf(this.settings, this.configured)
+      const lensChanged = lensSig !== this.lensSettingsSig
+      const previousLensSig = this.lensSettingsSig
+      this.lensSettingsSig = lensSig
 
-      if (previousSig !== '' && changed && this.pageTranslator.isActive()) {
+      const pageSig = pageTranslationSigOf(this.settings, this.configured)
+      const pageChanged = pageSig !== this.pageSettingsSig
+      const previousPageSig = this.pageSettingsSig
+      this.pageSettingsSig = pageSig
+
+      const styleSig = pageStyleSigOf(this.settings)
+      const styleChanged = styleSig !== this.pageStyleSig
+      this.pageStyleSig = styleSig
+
+      if (previousPageSig !== '' && pageChanged && this.pageTranslator.isActive()) {
         this.pageTranslator.deactivate()
+      } else if (styleChanged && this.pageTranslator.isActive()) {
+        // Appearance-only change: restyle in place instead of losing translations.
+        this.pageTranslator.restyle(this.settings)
       }
 
-      if (this.canTranslateText() && changed) {
-        if (previousSig !== '') this.registry.resetErrorsToPending()
-        if (this.settings.autoTranslate) void this.scanVisibleAndTranslate()
+      if (previousLensSig !== '' && lensChanged) {
+        this.translationGeneration++
+        this.inflight.clear()
+        this.inflightTexts.clear()
+        this.registry.resetTranslationsToPending()
+      }
+      if (
+        this.canTranslateText() &&
+        this.settings.autoTranslate &&
+        (lensChanged || !previousSettings.autoTranslate)
+      ) {
+        void this.scanVisibleAndTranslate()
       }
       if (this.settings.autoPageTranslation) await this.maybeStartPageTranslation()
     } catch (error) {
@@ -255,18 +352,37 @@ export class LensController {
     }
     if (this.settings.pageTranslationEngine === 'external' && !this.configured) return
 
+    const settingsGeneration = this.settingsGeneration
+    const settings = this.settings
+    const configured = this.configured
     this.autoPageStartPending = true
     try {
-      if (this.settings.pageTranslationEngine === 'browser') {
+      if (settings.pageTranslationEngine === 'browser') {
         const availability = await this.browserTranslator.availability(
-          this.settings.sourceLang,
-          this.settings.targetLang,
+          settings.sourceLang,
+          settings.targetLang,
         )
         if (availability !== 'available') return
       }
-      await this.pageTranslator.activate(this.settings, this.configured)
+      if (
+        settingsGeneration !== this.settingsGeneration ||
+        this.pausedHere ||
+        !this.settings.autoPageTranslation ||
+        this.pageTranslator.isActive()
+      ) {
+        return
+      }
+      await this.pageTranslator.activate(settings, configured)
     } finally {
       this.autoPageStartPending = false
+      if (
+        settingsGeneration !== this.settingsGeneration &&
+        this.settings.autoPageTranslation &&
+        !this.pausedHere &&
+        !this.pageTranslator.isActive()
+      ) {
+        void this.maybeStartPageTranslation()
+      }
     }
   }
 
@@ -326,14 +442,25 @@ export class LensController {
   }
 
   private readonly onKeyUp = (e: KeyboardEvent): void => {
-    if (!this.lensActive || this.lensSticky || !this.isHotkeyRelease(e)) return
+    if (!this.lensActive || this.lensSticky) return
 
-    const heldMs = Date.now() - this.hotkeyDownAt
-    if (heldMs > 0 && heldMs < TAP_STICKY_MS) {
-      this.lensSticky = true
+    // The defining (non-modifier) key was released: this is the only event that
+    // may pin the lens, so tap-vs-hold is judged consistently regardless of the
+    // order in which combo keys are lifted.
+    if (e.code === this.settings.hotkey.code) {
+      const heldMs = Date.now() - this.hotkeyDownAt
+      if (heldMs > 0 && heldMs < TAP_STICKY_MS) {
+        this.lensSticky = true
+        return
+      }
+      this.deactivateLens()
       return
     }
-    this.deactivateLens()
+
+    // A required modifier was released before the defining key: the combo is
+    // broken, so drop the preview rather than leaving a dangling lens. Never
+    // auto-pins here, which prevents an out-of-order release from sticking.
+    if (this.isHotkeyModifierRelease(e)) this.deactivateLens()
   }
 
   private readonly onBlur = (): void => {
@@ -347,6 +474,14 @@ export class LensController {
     this.pointerFrame = requestAnimationFrame(() => {
       this.pointerFrame = 0
       this.updateLens()
+    })
+  }
+
+  private readonly onStickyReposition = (): void => {
+    if (!this.lensActive || !this.lensSticky || this.stickyFrame) return
+    this.stickyFrame = requestAnimationFrame(() => {
+      this.stickyFrame = 0
+      this.lens.reposition()
     })
   }
 
@@ -495,12 +630,18 @@ export class LensController {
   private async translateWithBrowser(blocks: TranslateBlock[]): Promise<void> {
     if (!this.browserTranslator.isSupported()) return
 
+    const generation = this.translationGeneration
+    const sourceLang = this.settings.sourceLang
+    const targetLang = this.settings.targetLang
+
     for (const block of blocks) {
+      if (generation !== this.translationGeneration) return
       const translation = await this.browserTranslator.translate(
         block.text,
-        this.settings.sourceLang,
-        this.settings.targetLang,
+        sourceLang,
+        targetLang,
       )
+      if (generation !== this.translationGeneration) return
       if (translation) this.registry.setTranslation(block.id, translation)
     }
   }
@@ -512,6 +653,9 @@ export class LensController {
   async translateSpecific(blocks: TranslateBlock[]): Promise<void> {
     if (this.pausedHere) return
 
+    const generation = this.translationGeneration
+    const engine = this.settings.translationEngine
+    const configured = this.configured
     const todo: TranslateBlock[] = []
     const seenText = new Set<string>()
 
@@ -532,24 +676,25 @@ export class LensController {
     if (!todo.length) return
 
     for (const b of todo) {
-      this.inflight.add(b.id)
-      this.inflightTexts.add(normalizeText(b.text))
+      this.inflight.set(b.id, generation)
+      this.inflightTexts.set(normalizeText(b.text), generation)
       this.registry.setPending(b.id)
     }
 
     let error =
-      this.settings.translationEngine === 'browser'
+      engine === 'browser'
         ? 'Chrome 内置翻译不可用或不支持当前语言对'
         : '外部 API 未配置'
     try {
-      if (this.settings.translationEngine === 'browser') {
+      if (engine === 'browser') {
         await this.translateWithBrowser(todo)
-      } else if (this.configured) {
+      } else if (configured) {
         const response: unknown = await chrome.runtime.sendMessage({
           type: 'translate-batch',
           pageKey: makePageKey(),
           blocks: todo,
         })
+        if (generation !== this.translationGeneration) return
         if (!isTranslateBatchResult(response)) {
           error = '翻译服务未返回有效结果'
         } else {
@@ -560,18 +705,21 @@ export class LensController {
         }
       }
 
+      if (generation !== this.translationGeneration) return
       for (const b of todo) {
         if (!this.registry.get(b.id)?.translation) this.registry.setError(b.id, error)
       }
     } catch (err) {
+      if (generation !== this.translationGeneration) return
       error = err instanceof Error ? err.message : String(err)
       for (const b of todo) {
         if (!this.registry.get(b.id)?.translation) this.registry.setError(b.id, error)
       }
     } finally {
       for (const b of todo) {
-        this.inflight.delete(b.id)
-        this.inflightTexts.delete(normalizeText(b.text))
+        if (this.inflight.get(b.id) === generation) this.inflight.delete(b.id)
+        const text = normalizeText(b.text)
+        if (this.inflightTexts.get(text) === generation) this.inflightTexts.delete(text)
       }
     }
 
@@ -596,22 +744,12 @@ export class LensController {
     return this.imageRegistry.upsert(makeBlockId('img', url, coarsePath(hit)), hit, url)
   }
 
-  private isHotkeyRelease(e: KeyboardEvent): boolean {
+  private isHotkeyModifierRelease(e: KeyboardEvent): boolean {
     const h = this.settings.hotkey
-    if (e.code === h.code) return true
-    if (h.altKey && (e.code === 'AltLeft' || e.code === 'AltRight' || e.key === 'Alt')) return true
-    if (h.shiftKey && (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.key === 'Shift')) {
-      return true
-    }
-    if (
-      h.ctrlKey &&
-      (e.code === 'ControlLeft' || e.code === 'ControlRight' || e.key === 'Control')
-    ) {
-      return true
-    }
-    if (h.metaKey && (e.code === 'MetaLeft' || e.code === 'MetaRight' || e.key === 'Meta')) {
-      return true
-    }
+    if (h.altKey && (e.code === 'AltLeft' || e.code === 'AltRight')) return true
+    if (h.shiftKey && (e.code === 'ShiftLeft' || e.code === 'ShiftRight')) return true
+    if (h.ctrlKey && (e.code === 'ControlLeft' || e.code === 'ControlRight')) return true
+    if (h.metaKey && (e.code === 'MetaLeft' || e.code === 'MetaRight')) return true
     return false
   }
 }

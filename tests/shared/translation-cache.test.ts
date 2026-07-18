@@ -55,3 +55,32 @@ describe('TranslationCache LRU bounds', () => {
     expect(c.get('k2')).toBeUndefined()
   })
 })
+
+describe('TranslationCache persistence', () => {
+  it('round-trips entries through a snapshot', () => {
+    const a = new TranslationCache({ maxEntries: 10, maxTotalChars: 1_000_000 })
+    a.set('k1', '一')
+    a.set('k2', '二')
+    const snapshot = a.entries()
+
+    const b = new TranslationCache({ maxEntries: 10, maxTotalChars: 1_000_000 })
+    b.load(snapshot)
+    expect(b.get('k1')).toBe('一')
+    expect(b.get('k2')).toBe('二')
+    expect(b.size).toBe(2)
+  })
+
+  it('load replaces prior contents and re-applies capacity limits', () => {
+    const c = new TranslationCache({ maxEntries: 2, maxTotalChars: 1_000_000 })
+    c.set('old', 'x')
+    c.load([
+      ['a', '1'],
+      ['b', '2'],
+      ['c', '3'],
+    ])
+    expect(c.get('old')).toBeUndefined()
+    expect(c.size).toBe(2)
+    expect(c.get('a')).toBeUndefined() // oldest evicted under maxEntries=2
+    expect(c.get('c')).toBe('3')
+  })
+})

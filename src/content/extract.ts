@@ -175,12 +175,23 @@ const SKIP_CLOSEST =
     // keep option for <select> menus only via closest select above
     'nav',
     'pre', // fenced code / preformatted — usually not continuous reading target
-    '[contenteditable="true"]',
+    '[contenteditable]:not([contenteditable="false"])',
+    '[role="textbox"]',
+    // Rich-text editor placeholders (Draft.js/ProseMirror/etc.) sit *beside* the
+    // editable node, so the contenteditable skip above misses them. They vanish the
+    // moment the user types, so translating them only leaves stray, misaligned text.
+    '[class*="DraftEditorPlaceholder"]',
+    '[class*="EditorPlaceholder"]',
+    '[class*="editor-placeholder"]',
     '[aria-hidden="true"]',
     '[role="navigation"]',
     '[role="banner"]',
     '[role="search"]',
     '[role="toolbar"]',
+    // Transient overlays positioned over other content; an injected ::after here
+    // lands on top of whatever the tooltip points at (e.g. GitHub's <tool-tip>).
+    '[role="tooltip"]',
+    'tool-tip',
     '[data-lens-ignore]',
     '[data-lens-page-translation]',
     '#lens-translator-root',
@@ -261,8 +272,51 @@ function isRendered(el: Element, rect = el.getBoundingClientRect()): boolean {
   return true
 }
 
+/** Subtrees whose text must never be translated even when nested inside a content block. */
+const NON_CONTENT_TEXT_TAGS = new Set(['script', 'style', 'noscript', 'template'])
+
+/**
+ * Element text excluding embedded non-rendered content.
+ *
+ * `Element.textContent` concatenates the text of <script>/<style>/<template>/<noscript>
+ * descendants. Many sites embed machine-readable JSON next to visible UI (e.g. GitHub puts
+ * subscription props in a <script type="application/json"> beside the "Watch" button). That
+ * leaked JSON otherwise reaches the model and comes back as garbled translation, so we walk
+ * text nodes and skip those subtrees.
+ */
+export function elementText(el: Element): string {
+  if (
+    typeof el.querySelector !== 'function' ||
+    typeof document === 'undefined' ||
+    typeof document.createTreeWalker !== 'function' ||
+    !el.querySelector('script, style, noscript, template')
+  ) {
+    return el.textContent ?? ''
+  }
+  const walker = document.createTreeWalker(el, 4 /* SHOW_TEXT */, {
+    acceptNode(node) {
+      let ancestor = node.parentElement
+      while (ancestor && ancestor !== el) {
+        if (NON_CONTENT_TEXT_TAGS.has(ancestor.tagName.toLowerCase())) {
+          return 2 // FILTER_REJECT
+        }
+        ancestor = ancestor.parentElement
+      }
+      return 1 // FILTER_ACCEPT
+    },
+  })
+  let text = ''
+  let node = walker.nextNode()
+  while (node) {
+    text += node.nodeValue ?? ''
+    node = walker.nextNode()
+  }
+  return text
+}
+
 function sourceTextOf(el: Element): string {
-  return normalizeText(el.getAttribute(PAGE_SOURCE_ATTR) ?? el.textContent ?? '')
+  const stored = el.getAttribute(PAGE_SOURCE_ATTR)
+  return normalizeText(stored ?? elementText(el))
 }
 
 export function isPhrasingOnly(el: Element): boolean {

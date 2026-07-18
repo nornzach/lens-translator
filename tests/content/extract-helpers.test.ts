@@ -7,6 +7,7 @@ import {
   isLeafTextContainer,
   isUiLabelElement,
   dedupeNestedBlocks,
+  elementText,
   extractBlockAtElement,
   extractPageBlocks,
   extractVisibleBlocks,
@@ -277,6 +278,45 @@ describe('phrasing + hints', () => {
       },
     ])
   })
+
+describe('elementText excludes embedded non-content subtrees', () => {
+  it('drops <script type="application/json"> text next to visible UI', () => {
+    const container = { tagName: 'DIV', parentElement: null } as unknown as Element
+    const button = { tagName: 'BUTTON', parentElement: container } as unknown as Element
+    const script = { tagName: 'SCRIPT', parentElement: container } as unknown as Element
+    const visibleText = { nodeValue: 'Watch 13', parentElement: button }
+    const jsonText = {
+      nodeValue: '{"props":{"SubscriptionType":"None","RepositoryId":1053118194}}',
+      parentElement: script,
+    }
+    ;(container as unknown as { querySelector: () => Element }).querySelector = () => script
+
+    vi.stubGlobal('document', {
+      createTreeWalker: (
+        _root: Node,
+        _show: number,
+        filter: { acceptNode: (node: Node) => number },
+      ) => {
+        const yielded = [visibleText, jsonText].filter(
+          (n) => filter.acceptNode(n as unknown as Node) === 1,
+        )
+        let i = 0
+        return { nextNode: () => (yielded[i++] ?? null) as unknown as Node }
+      },
+    })
+
+    expect(elementText(container)).toBe('Watch 13')
+  })
+
+  it('returns textContent directly when there is no embedded script/style', () => {
+    const el = {
+      tagName: 'P',
+      textContent: 'Plain readable prose.',
+      querySelector: () => null,
+    } as unknown as Element
+    expect(elementText(el)).toBe('Plain readable prose.')
+  })
+})
 
 describe('dedupeNestedBlocks', () => {
   it('drops parent when child covers most text', () => {

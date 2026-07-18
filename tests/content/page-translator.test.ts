@@ -114,6 +114,23 @@ describe('isPageTranslationCandidate', () => {
     }
   })
 
+  it('skips grid/chart widgets and bare date-axis labels that break layout', () => {
+    const gridLabels = [
+      { id: 'month', text: 'Jul', ancestors: [{ tagName: 'td' }, { tagName: 'table', role: 'grid' }] },
+      { id: 'weekday', text: 'Mon', ancestors: [{ tagName: 'td' }, { tagName: 'table', role: 'grid' }] },
+    ]
+    for (const { id, text, ancestors } of gridLabels) {
+      const candidate = { id, el: candidateElement(text, 'span', ancestors), tag: 'span', text }
+      expect(isPageTranslationCandidate(candidate, 2)).toBe(false)
+    }
+
+    // Even outside a grid, a standalone month/weekday token adds no value and risks layout.
+    for (const text of ['August', 'Sunday', 'Sep', 'May']) {
+      const candidate = { id: text, el: candidateElement(text, 'span'), tag: 'span', text }
+      expect(isPageTranslationCandidate(candidate, 2)).toBe(false)
+    }
+  })
+
   it('places UI translation on the inner text label instead of the flex link', () => {
     const label = candidateElement('Home', 'span')
     const link = candidateElement('Home', 'a')
