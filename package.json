@@ -1,6 +1,6 @@
 {
   "name": "feat-lens-translator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Hold a hotkey to peek Chinese translations without leaving English immersion.",
   "private": true,
   "type": "module",
