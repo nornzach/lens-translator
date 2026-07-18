@@ -383,6 +383,8 @@ export class PageTranslator {
     this.observer = null
     this.alignment.deactivate()
     this.observedRoots = new WeakSet<Node>()
+    this.lastStatusText = ''
+    this.progressTick = 0
     window.clearTimeout(this.statusTimer)
     window.clearTimeout(this.mutationTimer)
     window.clearTimeout(this.initialRetryTimer)
@@ -835,7 +837,17 @@ export class PageTranslator {
     style.textContent = pageStyles(settings)
   }
 
+  private lastStatusText = ''
+
   private showStatus(text: string, error = false): void {
+    // Skip no-op DOM writes — rapid rescans used to rewrite the same toast and flicker.
+    if (
+      text === this.lastStatusText &&
+      document.getElementById(STATUS_ID)?.dataset.error === (error ? 'true' : 'false')
+    ) {
+      return
+    }
+    this.lastStatusText = text
     let status = document.getElementById(STATUS_ID)
     if (!status) {
       status = document.createElement('div')
@@ -849,7 +861,13 @@ export class PageTranslator {
     status.textContent = text
   }
 
+  private progressTick = 0
+
   private updateProgress(): void {
+    // Throttle progress toasts so mutation-driven rescans do not strobe the corner badge.
+    const now = Date.now()
+    if (now - this.progressTick < 400 && this.processedCount < this.totalCount) return
+    this.progressTick = now
     this.showStatus(`整页翻译 ${Math.min(this.processedCount, this.totalCount)}/${this.totalCount}`)
   }
 

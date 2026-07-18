@@ -29,7 +29,7 @@ import { ImageRegistry, type ImageTranslationEntry } from './image-registry'
 import { makePageKey } from './page-key'
 import { TranslationBatcher } from './translation-batcher'
 import { PageTranslator } from './page-translator'
-import { pageMatchesSourceLanguage } from './page-language'
+import { evaluatePageLanguageMatch } from './page-language'
 import { SelectionTranslator } from './selection-translator'
 import { SetupPrompt } from './setup-prompt'
 
@@ -165,6 +165,20 @@ export class LensController {
   private pageSettingsSig = ''
   private pageStyleSig = ''
   private autoPageStartPending = false
+  /**
+   * Auto full-page start is once-per-page and must never fight the user:
+   * - suppress: user closed full-page (Esc/toggle) → do not re-open until they re-enable the switch
+   * - abandoned: this page definitively is not the source language / pack unusable
+   * Retries only cover SPA hydration and language-pack download, with hard caps.
+   */
+  private autoPageRetryTimer = 0
+  private autoPageRetryDeadline = 0
+  private autoPageRetryAttempts = 0
+  private autoPageRetryBackoffMs = 1000
+  private autoPageSuppress = false
+  private autoPageAbandoned = false
+  private autoPageNoticeAt = 0
+  private autoPageNoticeText = ''
   private settingsGeneration = 0
   private translationGeneration = 0
 
@@ -277,6 +291,7 @@ export class LensController {
         if (this.lensActive) this.deactivateLens()
         if (this.pageTranslator.isActive()) this.pageTranslator.deactivate()
         this.selectionTranslator.hide()
+        this.suppressAutoPage('paused')
       }
       this.lens.setWidth(this.settings.lensWidthPx)
       this.lens.setFontSize(this.settings.pageTranslationFontSizePx)
@@ -313,6 +328,19 @@ export class LensController {
         this.pageTranslator.restyle(this.settings)
       }
 
+      // Re-arm auto-start only when the user turns the switch on, or language/engine changes.
+      if (
+        this.settings.autoPageTranslation &&
+        (!previousSettings.autoPageTranslation || pageChanged)
+      ) {
+        this.autoPageSuppress = false
+        this.autoPageAbandoned = false
+        this.resetAutoPageRetryBudget()
+      }
+      if (!this.settings.autoPageTranslation) {
+        this.suppressAutoPage('auto-off')
+      }
+
       if (previousLensSig !== '' && lensChanged) {
         this.translationGeneration++
         this.inflight.clear()
@@ -347,11 +375,15 @@ export class LensController {
   async togglePageTranslation(): Promise<TogglePageTranslationResult> {
     if (this.pageTranslator.isActive()) {
       this.pageTranslator.deactivate()
+      // Manual close must not be undone by the next auto-start retry/settings tick.
+      this.suppressAutoPage('user-close')
       return { ok: true }
     }
     const ready = await this.ensureEngineReady('page')
     if (!ready.ok) return ready
     if (this.lensActive) this.deactivateLens()
+    // Manual open: suppress further auto-start noise for this page session.
+    this.suppressAutoPage('user-open')
     await this.pageTranslator.toggle(this.settings, this.configured)
     return { ok: true }
   }
@@ -412,14 +444,30 @@ export class LensController {
   async maybeStartPageTranslation(): Promise<void> {
     if (
       this.autoPageStartPending ||
+      this.autoPageSuppress ||
+      this.autoPageAbandoned ||
       this.pausedHere ||
       !this.settings.autoPageTranslation ||
-      this.pageTranslator.isActive() ||
-      !pageMatchesSourceLanguage(this.settings.sourceLang)
+      this.pageTranslator.isActive()
     ) {
       return
     }
-    if (this.settings.pageTranslationEngine === 'external' && !this.configured) return
+
+    const lang = evaluatePageLanguageMatch(this.settings.sourceLang)
+    if (!lang.matches) {
+      if (lang.shouldRetry) {
+        this.scheduleAutoPageRetry(`lang:${lang.reason}`)
+      } else {
+        // Definitive mismatch (e.g. long Chinese body) — stop polling this page.
+        this.abandonAutoPage(`lang:${lang.reason}`)
+      }
+      return
+    }
+
+    if (this.settings.pageTranslationEngine === 'external' && !this.configured) {
+      this.abandonAutoPage('external-unconfigured')
+      return
+    }
 
     const settingsGeneration = this.settingsGeneration
     const settings = this.settings
@@ -431,28 +479,140 @@ export class LensController {
           settings.sourceLang,
           settings.targetLang,
         )
-        if (availability !== 'available') return
+        if (availability !== 'available') {
+          if (availability === 'downloadable' || availability === 'downloading') {
+            this.scheduleAutoPageRetry(`pack:${availability}`)
+            this.noticeAutoPageBlocked(
+              availability === 'downloading'
+                ? 'Chrome 语言包下载中，就绪后将自动开启整页翻译'
+                : '请先在设置中下载 Chrome 语言包，才能自动开启整页翻译',
+            )
+          } else {
+            this.abandonAutoPage(`pack:${availability}`)
+            this.noticeAutoPageBlocked(
+              'Chrome 内置翻译当前不可用，自动整页已跳过（可改用外部 LLM 或手动开启）',
+            )
+          }
+          return
+        }
       }
       if (
         settingsGeneration !== this.settingsGeneration ||
+        this.autoPageSuppress ||
         this.pausedHere ||
         !this.settings.autoPageTranslation ||
         this.pageTranslator.isActive()
       ) {
         return
       }
+
+      // Hand off to PageTranslator once. Mutation observer there owns incremental content —
+      // this method must not keep re-activating.
+      this.clearAutoPageRetry()
       await this.pageTranslator.activate(settings, configured)
+      if (this.pageTranslator.isActive()) {
+        // Success (including “waiting for SPA content”): never auto-activate again on this page.
+        this.suppressAutoPage('auto-started')
+      } else {
+        // Hard failure (missing API, unsupported, empty after grace, …) — stop polling.
+        this.abandonAutoPage('activate-failed')
+      }
     } finally {
       this.autoPageStartPending = false
+      // Only re-enter immediately when settings changed mid-flight — never a free loop.
       if (
         settingsGeneration !== this.settingsGeneration &&
         this.settings.autoPageTranslation &&
+        !this.autoPageSuppress &&
+        !this.autoPageAbandoned &&
         !this.pausedHere &&
         !this.pageTranslator.isActive()
       ) {
         void this.maybeStartPageTranslation()
       }
     }
+  }
+
+  private static readonly AUTO_PAGE_RETRY_MAX_ATTEMPTS = 12
+  private static readonly AUTO_PAGE_RETRY_WINDOW_MS = 12_000
+  private static readonly AUTO_PAGE_RETRY_BACKOFF_MAX_MS = 2_500
+
+  private scheduleAutoPageRetry(_reason: string): void {
+    if (
+      !this.settings.autoPageTranslation ||
+      this.pausedHere ||
+      this.autoPageSuppress ||
+      this.autoPageAbandoned ||
+      this.pageTranslator.isActive()
+    ) {
+      return
+    }
+    const now = Date.now()
+    if (!this.autoPageRetryDeadline) {
+      this.autoPageRetryDeadline = now + LensController.AUTO_PAGE_RETRY_WINDOW_MS
+      this.autoPageRetryAttempts = 0
+      this.autoPageRetryBackoffMs = 1000
+    }
+    if (
+      now > this.autoPageRetryDeadline ||
+      this.autoPageRetryAttempts >= LensController.AUTO_PAGE_RETRY_MAX_ATTEMPTS
+    ) {
+      this.abandonAutoPage('retry-budget-exhausted')
+      return
+    }
+    if (this.autoPageRetryTimer) return
+
+    const delay = this.autoPageRetryBackoffMs
+    this.autoPageRetryAttempts++
+    this.autoPageRetryBackoffMs = Math.min(
+      Math.round(this.autoPageRetryBackoffMs * 1.35),
+      LensController.AUTO_PAGE_RETRY_BACKOFF_MAX_MS,
+    )
+    this.autoPageRetryTimer = window.setTimeout(() => {
+      this.autoPageRetryTimer = 0
+      if (
+        this.settings.autoPageTranslation &&
+        !this.autoPageSuppress &&
+        !this.autoPageAbandoned &&
+        !this.pausedHere &&
+        !this.pageTranslator.isActive()
+      ) {
+        void this.maybeStartPageTranslation()
+      }
+    }, delay)
+  }
+
+  private clearAutoPageRetry(): void {
+    if (this.autoPageRetryTimer) window.clearTimeout(this.autoPageRetryTimer)
+    this.autoPageRetryTimer = 0
+  }
+
+  private resetAutoPageRetryBudget(): void {
+    this.clearAutoPageRetry()
+    this.autoPageRetryDeadline = 0
+    this.autoPageRetryAttempts = 0
+    this.autoPageRetryBackoffMs = 1000
+  }
+
+  private suppressAutoPage(_reason: string): void {
+    this.autoPageSuppress = true
+    this.clearAutoPageRetry()
+  }
+
+  private abandonAutoPage(_reason: string): void {
+    this.autoPageAbandoned = true
+    this.clearAutoPageRetry()
+    this.autoPageRetryDeadline = 0
+    this.autoPageRetryAttempts = 0
+  }
+
+  /** Throttled console notice only — never mounts UI that could flicker. */
+  private noticeAutoPageBlocked(message: string): void {
+    const now = Date.now()
+    if (message === this.autoPageNoticeText && now - this.autoPageNoticeAt < 30_000) return
+    this.autoPageNoticeAt = now
+    this.autoPageNoticeText = message
+    console.info('[Lens Translator]', message)
   }
 
   // -------------------------------------------------------------------------
@@ -469,6 +629,7 @@ export class LensController {
       if (this.pageTranslator.isActive()) {
         e.preventDefault()
         this.pageTranslator.deactivate()
+        this.suppressAutoPage('escape')
         return
       }
     }
