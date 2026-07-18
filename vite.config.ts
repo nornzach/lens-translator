@@ -11,6 +11,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         bubble: resolve(__dirname, 'src/bubble/index.html'),
+        // Control panel is opened as a tab (no action default_popup); must be a build entry.
+        popup: resolve(__dirname, 'src/popup/index.html'),
       },
       output: {
         entryFileNames: 'assets/[name]-[hash].js',

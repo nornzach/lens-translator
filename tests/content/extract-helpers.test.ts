@@ -9,6 +9,7 @@ import {
   dedupeNestedBlocks,
   elementText,
   extractBlockAtElement,
+  extractLensBlockAtElement,
   extractPageBlocks,
   extractVisibleBlocks,
   PHRASING_TAGS,
@@ -190,6 +191,85 @@ describe('phrasing + hints', () => {
       el: paragraph,
       tag: 'p',
       text: 'Pointer-local extraction avoids scanning the full document on every move.',
+    })
+  })
+
+  it('lens deep extract accepts short labels without page min-length', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    })
+    // Non-UI bare span: page leaf heuristics + minLength 10 reject "OK".
+    const span = fakeEl({ tag: 'span', text: 'OK' })
+    Object.defineProperty(span, 'children', {
+      get: () => [] as unknown as HTMLCollection,
+    })
+    expect(extractBlockAtElement(span, 10)).toBeUndefined()
+    expect(extractLensBlockAtElement(span, 1)).toMatchObject({
+      el: span,
+      text: 'OK',
+    })
+  })
+
+  it('lens deep extract prefers the tight span over a huge ancestor shell', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    })
+    const span = fakeEl({
+      tag: 'span',
+      text: 'Hover this phrase only',
+    })
+    Object.defineProperty(span, 'children', {
+      get: () => [] as unknown as HTMLCollection,
+    })
+    const p1 = fakeEl({ tag: 'p', text: 'Paragraph one with enough length for shell detection here.' })
+    const p2 = fakeEl({ tag: 'p', text: 'Paragraph two with enough length for shell detection here.' })
+    const p3 = fakeEl({ tag: 'p', text: 'Paragraph three with enough length for shell detection.' })
+    const p4 = fakeEl({ tag: 'p', text: 'Paragraph four with enough length for shell detection.' })
+    const main = fakeEl({
+      tag: 'main',
+      text: [
+        'Hover this phrase only',
+        'Paragraph one with enough length for shell detection here.',
+        'Paragraph two with enough length for shell detection here.',
+        'Paragraph three with enough length for shell detection.',
+        'Paragraph four with enough length for shell detection.',
+      ].join(' '),
+      children: [span, p1, p2, p3, p4],
+    })
+    main.querySelectorAll = ((selector: string) => {
+      if (selector.includes('p,')) return [p1, p2, p3, p4]
+      return []
+    }) as unknown as typeof main.querySelectorAll
+    Object.defineProperty(span, 'parentElement', { get: () => main })
+
+    expect(extractLensBlockAtElement(span, 1)).toMatchObject({
+      el: span,
+      text: 'Hover this phrase only',
+    })
+  })
+
+  it('lens deep extract can read code/pre that page mode skips', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    })
+    const code = fakeEl({
+      tag: 'code',
+      text: 'npm install lens-translator',
+    })
+    Object.defineProperty(code, 'children', {
+      get: () => [] as unknown as HTMLCollection,
+    })
+    // Page skip list treats bare code as non-candidate.
+    expect(extractBlockAtElement(code, 2)).toBeUndefined()
+    expect(extractLensBlockAtElement(code, 1)).toMatchObject({
+      el: code,
+      text: 'npm install lens-translator',
     })
   })
 

@@ -40,6 +40,14 @@ export class FloatingBubbleHost {
     if (!this.host.isConnected) document.documentElement.append(this.host)
   }
 
+  setVisible(visible: boolean): void {
+    this.host.style.display = visible ? '' : 'none'
+    if (!visible) {
+      this.pinned = false
+      delete this.host.dataset.expanded
+    }
+  }
+
   private expand(): void {
     window.clearTimeout(this.collapseTimer)
     this.host.dataset.expanded = 'true'
@@ -93,28 +101,28 @@ const SHELL_STYLES = `
     height: 62px;
     overflow: hidden;
     pointer-events: auto;
-    border-radius: 22px 0 0 22px;
-    filter: drop-shadow(0 10px 22px rgb(15 23 42 / 18%));
+    border-radius: 18px 0 0 18px;
+    filter: drop-shadow(0 10px 24px rgb(15 23 42 / 16%));
     transition:
-      width 320ms cubic-bezier(.2,.8,.2,1),
-      height 320ms cubic-bezier(.2,.8,.2,1),
-      right 320ms cubic-bezier(.2,.8,.2,1),
-      top 320ms cubic-bezier(.2,.8,.2,1),
-      border-radius 320ms ease;
+      width 280ms cubic-bezier(.2,.8,.2,1),
+      height 280ms cubic-bezier(.2,.8,.2,1),
+      right 280ms cubic-bezier(.2,.8,.2,1),
+      top 280ms cubic-bezier(.2,.8,.2,1),
+      border-radius 220ms ease;
   }
   :host([data-expanded="true"]) {
-    top: clamp(12px, calc(50vh - 325px), 32px);
+    top: clamp(12px, calc(50vh - 260px), 28px);
     right: 12px;
-    width: min(372px, calc(100vw - 24px));
-    height: min(650px, calc(100vh - 24px));
-    border-radius: 8px;
+    width: min(360px, calc(100vw - 24px));
+    height: min(520px, calc(100vh - 24px));
+    border-radius: 12px;
   }
   @media (max-width: 520px) {
     :host([data-expanded="true"]) {
       top: 8px;
       right: 8px;
       width: calc(100vw - 16px);
-      height: min(650px, calc(100vh - 16px));
+      height: min(520px, calc(100vh - 16px));
     }
   }
   @media (prefers-reduced-motion: reduce) {

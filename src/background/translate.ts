@@ -197,20 +197,88 @@ export async function translateImage(
   }
 
   if (!result.ok) {
-    return {
-      ok: false,
-      error:
-        result.status === 400
-          ? `当前模型或服务商不支持图片输入：${result.error}`
-          : result.error,
-    }
+    return { ok: false, error: describeVisionError(result.error, result.status) }
   }
 
   try {
     return parseImageTranslationResult(JSON.parse(result.content))
   } catch {
-    return { ok: false, error: 'invalid JSON from model' }
+    return { ok: false, error: '模型返回的图片翻译结果不是有效 JSON' }
   }
+}
+
+/** Tiny 1×1 PNG used only to probe whether the model accepts image_url payloads. */
+const VISION_PROBE_DATA_URL =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+/**
+ * Probe multimodal support with a minimal image payload.
+ * Used by the options page “测试图片能力” control.
+ */
+export async function testVisionCapability(settings: UserSettings): Promise<ConnectionTestResult> {
+  const userPrompt = buildTranslateImagePrompt(settings.sourceLang, settings.targetLang)
+  const request: Omit<ChatJsonParams, 'useJsonSchema'> = {
+    baseURL: settings.baseURL,
+    apiKey: settings.apiKey,
+    model: settings.model,
+    systemPrompt: IMAGE_SYSTEM,
+    userPrompt,
+    userContent: [
+      { type: 'text', text: userPrompt },
+      { type: 'image_url', image_url: { url: VISION_PROBE_DATA_URL } },
+    ],
+    jsonSchema: IMAGE_TRANSLATION_JSON_SCHEMA,
+    provider: settings.provider,
+    reasoningPref: settings.reasoningPref,
+    requestTimeoutMs: 20_000,
+  }
+  let result = await chatCompletionsJson({ ...request, useJsonSchema: true })
+  if (!result.ok && result.status === 400) {
+    result = await chatCompletionsJson({ ...request, useJsonSchema: false })
+  }
+  if (!result.ok) {
+    return { ok: false, error: describeVisionError(result.error, result.status) }
+  }
+  try {
+    const parsed = parseImageTranslationResult(JSON.parse(result.content))
+    return parsed.ok
+      ? { ok: true }
+      : { ok: false, error: `图片接口有响应，但格式无效：${parsed.error}` }
+  } catch {
+    return {
+      ok: false,
+      error: '图片接口有响应，但未返回可解析的 JSON（模型可能不支持视觉输入）',
+    }
+  }
+}
+
+function describeVisionError(error: string, status?: number): string {
+  if (status === 401 || status === 403) {
+    return `鉴权失败（HTTP ${status}）：请检查 API Key 是否正确。`
+  }
+  if (status === 404) {
+    return 'HTTP 404：接口地址或模型名可能不正确。'
+  }
+  if (status === 429) {
+    return 'HTTP 429：请求过于频繁或额度不足。'
+  }
+  if (status === 400) {
+    return `当前模型或服务商不支持图片输入（HTTP 400）：${error}`
+  }
+  if (status !== undefined && status >= 500) {
+    return `上游服务异常（HTTP ${status}），请稍后再试。`
+  }
+  const lower = error.toLowerCase()
+  if (
+    lower.includes('image') ||
+    lower.includes('vision') ||
+    lower.includes('multimodal') ||
+    lower.includes('content') ||
+    lower.includes('不支持')
+  ) {
+    return `图片翻译失败：${error}。请确认模型支持 OpenAI 兼容的 image_url 多模态输入。`
+  }
+  return error
 }
 
 /** Read supported image bytes with a hard streaming limit before base64 encoding. */

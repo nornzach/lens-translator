@@ -1,4 +1,5 @@
 import { matchesHotkey } from '../shared/hotkey'
+import { languageShortLabel } from '../shared/languages'
 import { makeBlockId } from '../shared/block-id'
 import type { UserSettings } from '../shared/settings-defaults'
 import { DEFAULT_SETTINGS, mergeSettings } from '../shared/settings-defaults'
@@ -6,6 +7,7 @@ import type {
   BubbleControlMsg,
   BubbleControlResult,
   SettingsMsg,
+  ToggleLensResult,
   TranslateBatchResultErr,
   TranslateBatchResultOk,
   TranslateBlock,
@@ -14,7 +16,12 @@ import type {
   TogglePageTranslationResult,
 } from '../shared/messages'
 import { isPredominantlyTargetLanguage, normalizeText } from '../shared/text'
-import { coarsePath, extractBlockAtElement, extractVisibleBlocks } from './extract'
+import {
+  coarsePath,
+  extractLensTargetAt,
+  extractVisibleBlocks,
+  LENS_MIN_TEXT_LENGTH,
+} from './extract'
 import { BlockRegistry } from './registry'
 import { LensOverlay } from './lens'
 import { BrowserTranslator } from './browser-translator'
@@ -23,6 +30,8 @@ import { makePageKey } from './page-key'
 import { TranslationBatcher } from './translation-batcher'
 import { PageTranslator } from './page-translator'
 import { pageMatchesSourceLanguage } from './page-language'
+import { SelectionTranslator } from './selection-translator'
+import { SetupPrompt } from './setup-prompt'
 
 const TAP_STICKY_MS = 320
 
@@ -145,6 +154,8 @@ export class LensController {
   private readonly pageTranslator = new PageTranslator(this.browserTranslator)
   private readonly lens: LensOverlay
   private readonly batcher: TranslationBatcher
+  private readonly setupPrompt = new SetupPrompt()
+  private readonly selectionTranslator: SelectionTranslator
 
   // --- settings state ---
   settings: UserSettings = DEFAULT_SETTINGS
@@ -161,7 +172,11 @@ export class LensController {
   private lensActive = false
   private lensSticky = false
   private hotkeyDownAt = 0
+  /** True while the lens hotkey combo is physically held (survives async readiness checks). */
+  private hotkeyHeld = false
   private lastMouse = { x: 0, y: 0 }
+  /** Throttle full-screen setup prompt when selection translation hits a cold engine. */
+  private lastSelectionSetupPromptAt = 0
 
   // --- in-flight dedup ---
   /** In-flight block ids — avoid duplicate API calls for the same block. */
@@ -174,10 +189,19 @@ export class LensController {
   private pointerFrame = 0
   private stickyFrame = 0
   private listenersBound = false
+  private autoScanMo: MutationObserver | null = null
+  private onBubbleVisibility: ((visible: boolean) => void) | null = null
 
   constructor(lensWidthPx = 340) {
     this.lens = new LensOverlay(lensWidthPx)
     this.batcher = new TranslationBatcher((blocks) => this.translateSpecific(blocks))
+    this.selectionTranslator = new SelectionTranslator((text) => this.translateSelectionText(text))
+  }
+
+  /** Optional host for the edge bubble so settings can hide it without remounting. */
+  setBubbleVisibilityHandler(handler: (visible: boolean) => void): void {
+    this.onBubbleVisibility = handler
+    handler(this.settings.showFloatingBubble !== false && !this.pausedHere)
   }
 
   // -------------------------------------------------------------------------
@@ -187,6 +211,7 @@ export class LensController {
   bindListeners(): void {
     if (this.listenersBound) return
     this.listenersBound = true
+    this.selectionTranslator.bind()
     window.addEventListener('keydown', this.onKeyDown, true)
     window.addEventListener('keyup', this.onKeyUp, true)
     window.addEventListener('blur', this.onBlur)
@@ -203,23 +228,24 @@ export class LensController {
     window.addEventListener('scroll', this.onStickyReposition, true)
     window.addEventListener('resize', this.onStickyReposition)
 
-    const mo = new MutationObserver(
-      debounce(() => {
-        if (this.settings.autoTranslate) void this.scanVisibleAndTranslate()
-      }, 500),
-    )
-    mo.observe(document.documentElement, { childList: true, subtree: true })
+    // MutationObserver is only attached while auto-prefetch is on (see syncAutoScanObserver).
 
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === 'local' && changes.settings) void this.refreshSettings()
     })
 
-    // Popup and floating controls drive the same state transitions as hotkeys.
+    // Popup, toolbar icon, and floating controls drive the same state transitions as hotkeys.
     chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
       if (sender.id !== chrome.runtime.id || !message || typeof message !== 'object') return false
       const type = (message as { type?: unknown }).type
       if (type === 'toggle-page-translation') {
         void this.togglePageTranslation().then(sendResponse, (error: unknown) => {
+          sendResponse(controlError(error))
+        })
+        return true
+      }
+      if (type === 'toggle-lens') {
+        void this.toggleStickyLensAsync().then(sendResponse, (error: unknown) => {
           sendResponse(controlError(error))
         })
         return true
@@ -250,11 +276,21 @@ export class LensController {
       if (this.pausedHere) {
         if (this.lensActive) this.deactivateLens()
         if (this.pageTranslator.isActive()) this.pageTranslator.deactivate()
+        this.selectionTranslator.hide()
       }
       this.lens.setWidth(this.settings.lensWidthPx)
       this.lens.setFontSize(this.settings.pageTranslationFontSizePx)
       this.lens.setFontFamily(this.settings.pageTranslationFontFamily)
       this.lens.setAppearance(this.settings)
+      this.lens.setLanguageLabels(
+        languageShortLabel(this.settings.sourceLang),
+        languageShortLabel(this.settings.targetLang),
+      )
+      this.selectionTranslator.setPaused(this.pausedHere)
+      this.selectionTranslator.setEnabled(this.settings.selectionTranslate)
+      this.selectionTranslator.setLanguages(this.settings.sourceLang, this.settings.targetLang)
+      this.onBubbleVisibility?.(this.settings.showFloatingBubble && !this.pausedHere)
+      this.syncAutoScanObserver()
 
       const lensSig = lensTranslationSigOf(this.settings, this.configured)
       const lensChanged = lensSig !== this.lensSettingsSig
@@ -313,36 +349,46 @@ export class LensController {
       this.pageTranslator.deactivate()
       return { ok: true }
     }
-    const error = this.pageTranslationError()
-    if (error) return { ok: false, error }
+    const ready = await this.ensureEngineReady('page')
+    if (!ready.ok) return ready
     if (this.lensActive) this.deactivateLens()
     await this.pageTranslator.toggle(this.settings, this.configured)
     return { ok: true }
   }
 
-  toggleStickyLens(): BubbleControlResult {
+  /** Always gates on engine readiness (language pack / API), never only isSupported(). */
+  async toggleStickyLensAsync(): Promise<ToggleLensResult> {
     if (this.lensActive) {
       this.deactivateLens()
-      return this.bubbleState()
+      return { ok: true, lensActive: false }
     }
     if (this.pausedHere) return { ok: false, error: '当前网站已暂停翻译' }
-    if (!this.canTranslateText()) {
-      return {
-        ok: false,
-        error:
-          this.settings.translationEngine === 'browser'
-            ? '当前浏览器不支持 Chrome 内置翻译'
-            : '透镜翻译需要先配置外部 API',
-      }
-    }
+    const ready = await this.ensureEngineReady('lens')
+    if (!ready.ok) return ready
+    this.activateStickyLens()
+    return { ok: true, lensActive: true }
+  }
+
+  private activateStickyLens(): void {
     this.lensActive = true
     this.lensSticky = true
+    this.hotkeyHeld = false
     this.ensureMouseSeed()
     if (this.settings.translationEngine === 'browser') {
       void this.browserTranslator.prepare(this.settings.sourceLang, this.settings.targetLang)
     }
     this.updateLens()
-    return this.bubbleState()
+  }
+
+  private activateTemporaryLens(downAt: number): void {
+    this.lensActive = true
+    this.lensSticky = false
+    this.hotkeyDownAt = downAt
+    this.ensureMouseSeed()
+    if (this.settings.translationEngine === 'browser') {
+      void this.browserTranslator.prepare(this.settings.sourceLang, this.settings.targetLang)
+    }
+    this.updateLens()
   }
 
   async scanVisibleAndTranslate(): Promise<void> {
@@ -452,24 +498,46 @@ export class LensController {
     }
 
     if (!this.lensActive) {
-      this.lensActive = true
-      this.lensSticky = false
+      // Record hold state *before* any await so release during readiness is observed.
+      this.hotkeyHeld = true
       this.hotkeyDownAt = Date.now()
-      this.ensureMouseSeed()
-      if (this.settings.translationEngine === 'browser' && this.browserTranslator.isSupported()) {
-        void this.browserTranslator.prepare(this.settings.sourceLang, this.settings.targetLang)
-      }
-      this.updateLens()
+      void this.beginHotkeyLens(this.hotkeyDownAt)
     }
   }
 
+  /**
+   * Hold/tap hotkey entry. Engine readiness is async; if the user already released
+   * during the check, a short press pins sticky and a long press does nothing.
+   */
+  private async beginHotkeyLens(downAt: number): Promise<void> {
+    const ready = await this.ensureEngineReady('lens')
+    if (!ready.ok) {
+      this.hotkeyHeld = false
+      return
+    }
+    if (this.lensActive) return
+
+    if (!this.hotkeyHeld) {
+      const heldMs = Date.now() - downAt
+      // Tap completed while we were waiting → pin sticky. Long hold already over → stay closed.
+      if (heldMs > 0 && heldMs < TAP_STICKY_MS) this.activateStickyLens()
+      return
+    }
+
+    this.activateTemporaryLens(downAt)
+  }
+
   private readonly onKeyUp = (e: KeyboardEvent): void => {
+    const isDefining = e.code === this.settings.hotkey.code
+    const isModifier = this.isHotkeyModifierRelease(e)
+    if (isDefining || isModifier) this.hotkeyHeld = false
+
     if (!this.lensActive || this.lensSticky) return
 
     // The defining (non-modifier) key was released: this is the only event that
     // may pin the lens, so tap-vs-hold is judged consistently regardless of the
     // order in which combo keys are lifted.
-    if (e.code === this.settings.hotkey.code) {
+    if (isDefining) {
       const heldMs = Date.now() - this.hotkeyDownAt
       if (heldMs > 0 && heldMs < TAP_STICKY_MS) {
         this.lensSticky = true
@@ -482,10 +550,11 @@ export class LensController {
     // A required modifier was released before the defining key: the combo is
     // broken, so drop the preview rather than leaving a dangling lens. Never
     // auto-pins here, which prevents an out-of-order release from sticking.
-    if (this.isHotkeyModifierRelease(e)) this.deactivateLens()
+    if (isModifier) this.deactivateLens()
   }
 
   private readonly onBlur = (): void => {
+    this.hotkeyHeld = false
     if (this.lensActive && !this.lensSticky) this.deactivateLens()
   }
 
@@ -569,10 +638,19 @@ export class LensController {
       return
     }
 
+    // Lens uses deep pointer resolution (caret + tightest unit), not full-page
+    // extract policy (which skips nav/pre/tooltips and enforces long min lengths).
+    const lensMin = Math.min(LENS_MIN_TEXT_LENGTH + 1, this.settings.minTextLength)
     let entry = this.registry.getByElement(hit)
     if (!entry) {
-      const block = extractBlockAtElement(hit, this.settings.minTextLength)
+      const block = extractLensTargetAt(this.lastMouse.x, this.lastMouse.y, lensMin)
       if (block) entry = this.registry.upsert(block)
+    } else {
+      // If registry only has a coarse parent from prefetch, re-resolve tightly under the cursor.
+      const deep = extractLensTargetAt(this.lastMouse.x, this.lastMouse.y, lensMin)
+      if (deep && deep.el !== entry.el && deep.text.length < entry.text.length) {
+        entry = this.registry.upsert(deep)
+      }
     }
 
     if (!entry) {
@@ -625,6 +703,7 @@ export class LensController {
   private deactivateLens(): void {
     this.lensActive = false
     this.lensSticky = false
+    this.hotkeyHeld = false
     this.hotkeyDownAt = 0
     this.lens.hide()
   }
@@ -648,7 +727,7 @@ export class LensController {
       } else if (result.ok) {
         this.imageRegistry.setTranslation(entry.id, result.translation)
       } else {
-        this.imageRegistry.setError(entry.id, result.error)
+        this.imageRegistry.setError(entry.id, clarifyImageError(result.error))
       }
     } catch (error) {
       this.imageRegistry.setError(entry.id, error instanceof Error ? error.message : String(error))
@@ -773,18 +852,149 @@ export class LensController {
       : this.configured
   }
 
-  private pageTranslationError(): string | null {
-    if (this.pausedHere) return '当前网站已暂停翻译'
-    if (this.settings.pageTranslationEngine === 'external' && !this.configured) {
-      return '整页翻译需要先配置外部 API'
+  private syncAutoScanObserver(): void {
+    if (this.settings.autoTranslate && !this.pausedHere) {
+      if (!this.autoScanMo) {
+        this.autoScanMo = new MutationObserver(
+          debounce(() => {
+            if (this.settings.autoTranslate) void this.scanVisibleAndTranslate()
+          }, 500),
+        )
+        this.autoScanMo.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+        })
+      }
+      return
     }
-    if (
-      this.settings.pageTranslationEngine === 'browser' &&
-      !this.browserTranslator.isSupported()
-    ) {
-      return '当前浏览器不支持 Chrome 内置翻译'
+    this.autoScanMo?.disconnect()
+    this.autoScanMo = null
+  }
+
+  /**
+   * Gate browser / external engines before starting lens or full-page mode.
+   * Shows an in-page prompt when a language pack is missing or LLM is unconfigured.
+   * `quiet` skips the modal (used by selection translate; prompt is rate-limited there).
+   */
+  private async ensureEngineReady(
+    mode: 'lens' | 'page',
+    opts?: { quiet?: boolean },
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (this.pausedHere) return { ok: false, error: '当前网站已暂停翻译' }
+    const engine =
+      mode === 'lens' ? this.settings.translationEngine : this.settings.pageTranslationEngine
+    const quiet = opts?.quiet === true
+
+    if (engine === 'external') {
+      if (this.configured) return { ok: true }
+      if (!quiet) this.showEngineSetupPrompt({ kind: 'external-unconfigured' })
+      return {
+        ok: false,
+        error: mode === 'lens' ? '透镜翻译需要先配置外部 API' : '整页翻译需要先配置外部 API',
+      }
     }
-    return null
+
+    if (!this.browserTranslator.isSupported()) {
+      if (!quiet) this.showEngineSetupPrompt({ kind: 'browser-unsupported' })
+      return { ok: false, error: '当前浏览器不支持 Chrome 内置翻译' }
+    }
+
+    const availability = await this.browserTranslator.availability(
+      this.settings.sourceLang,
+      this.settings.targetLang,
+    )
+    if (availability === 'available') return { ok: true }
+
+    if (!quiet) this.showEngineSetupPrompt({ kind: 'language-pack', availability })
+
+    const message =
+      availability === 'unavailable'
+        ? '当前语言对在 Chrome 内置翻译中不可用'
+        : '需要先下载 Chrome 语言包'
+    return { ok: false, error: message }
+  }
+
+  private showEngineSetupPrompt(
+    reason:
+      | { kind: 'browser-unsupported' }
+      | { kind: 'external-unconfigured' }
+      | {
+          kind: 'language-pack'
+          availability: Awaited<ReturnType<BrowserTranslator['availability']>>
+        },
+  ): void {
+    if (this.setupPrompt.isOpen()) return
+    this.setupPrompt.show(
+      reason,
+      { sourceLang: this.settings.sourceLang, targetLang: this.settings.targetLang },
+      {
+        onDownload:
+          reason.kind === 'language-pack'
+            ? async () => {
+                this.setupPrompt.setStatus('正在下载语言包…')
+                const ready = await this.browserTranslator.prepare(
+                  this.settings.sourceLang,
+                  this.settings.targetLang,
+                  (progress) => {
+                    this.setupPrompt.setStatus(`语言包下载 ${Math.round(progress * 100)}%`)
+                  },
+                )
+                if (ready) {
+                  this.setupPrompt.setStatus('语言包已就绪，请再次开启翻译')
+                  window.setTimeout(() => this.setupPrompt.dismiss(), 900)
+                  return
+                }
+                this.setupPrompt.setStatus('语言包下载失败，请改用外部 LLM 或更换语言', true)
+              }
+            : undefined,
+        onOpenLlmSetup: () => {
+          void chrome.runtime.sendMessage({ type: 'open-options', hash: '#external-api' })
+        },
+        onOpenOnboarding: () => {
+          void chrome.runtime.sendMessage({ type: 'open-options', hash: '#onboarding' })
+        },
+      },
+    )
+  }
+
+  private async translateSelectionText(text: string): Promise<string | null> {
+    if (this.pausedHere) return null
+    if (this.settings.translationEngine === 'browser') {
+      const ready = await this.ensureEngineReady('lens', { quiet: true })
+      if (!ready.ok) {
+        this.maybePromptSetupFromSelection()
+        throw new Error(ready.error)
+      }
+      return this.browserTranslator.translate(
+        text,
+        this.settings.sourceLang,
+        this.settings.targetLang,
+      )
+    }
+    const ready = await this.ensureEngineReady('lens', { quiet: true })
+    if (!ready.ok) {
+      this.maybePromptSetupFromSelection()
+      throw new Error(ready.error)
+    }
+    const response: unknown = await chrome.runtime.sendMessage({
+      type: 'translate-batch',
+      pageKey: makePageKey(),
+      blocks: [{ id: 'sel', tag: 'selection', text }],
+    })
+    if (!isTranslateBatchResult(response) || !response.ok) {
+      if (isTranslateBatchResult(response) && !response.ok) throw new Error(response.error)
+      throw new Error('翻译服务未返回有效结果')
+    }
+    return response.translations.find((item) => item.id === 'sel')?.translation ?? null
+  }
+
+  /** At most one full setup modal per minute from selection-driven failures. */
+  private maybePromptSetupFromSelection(): void {
+    const now = Date.now()
+    if (now - this.lastSelectionSetupPromptAt < 60_000) return
+    this.lastSelectionSetupPromptAt = now
+    void this.ensureEngineReady('lens')
   }
 
   private bubbleState(): BubbleControlResult {
@@ -797,7 +1007,10 @@ export class LensController {
 
   private async handleBubbleControl(message: BubbleControlMsg): Promise<BubbleControlResult> {
     if (message.command === 'get-state') return this.bubbleState()
-    if (message.command === 'toggle-lens') return this.toggleStickyLens()
+    if (message.command === 'toggle-lens') {
+      const result = await this.toggleStickyLensAsync()
+      return result.ok ? this.bubbleState() : result
+    }
     const result = await this.togglePageTranslation()
     return result.ok ? this.bubbleState() : result
   }
@@ -831,6 +1044,27 @@ function isBubbleControlMessage(value: object): value is BubbleControlMsg {
 
 function controlError(error: unknown): { ok: false; error: string } {
   return { ok: false, error: error instanceof Error ? error.message : String(error) }
+}
+
+/** Make vision/model failures actionable for users pointing the lens at images. */
+function clarifyImageError(error: string): string {
+  const lower = error.toLowerCase()
+  if (error.includes('API not configured') || error.includes('未配置')) {
+    return '图片翻译需要外部多模态模型：请先配置 Base URL、API Key 与支持 image 的模型'
+  }
+  if (
+    lower.includes('image') &&
+    (lower.includes('not support') ||
+      lower.includes('unsupported') ||
+      lower.includes('invalid') ||
+      lower.includes('不支持'))
+  ) {
+    return error
+  }
+  if (error.includes('400') || lower.includes('invalid_request') || lower.includes('unknown field')) {
+    return `当前模型可能不支持图片输入：${error}`
+  }
+  return error
 }
 
 // ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ async function main(): Promise<void> {
   const controller = new LensController(340)
   const bubble = new FloatingBubbleHost()
   bubble.mount()
+  controller.setBubbleVisibilityHandler((visible) => bubble.setVisible(visible))
   controller.bindListeners()
   controller.ensureMouseSeed()
   // refreshSettings() already kicks off the initial scan when auto-translate is on,

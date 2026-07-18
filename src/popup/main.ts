@@ -6,8 +6,10 @@ import {
   type UserSettings,
 } from '../shared/settings'
 import { formatHotkeyLabel } from '../shared/hotkey'
+import { languagePairLabel } from '../shared/languages'
 import type {
   PauseHostnameMsg,
+  ToggleLensResult,
   TogglePageTranslationMsg,
   TogglePageTranslationResult,
 } from '../shared/messages'
@@ -26,6 +28,32 @@ function hostnameFromUrl(url: string | undefined): string {
     return u.hostname
   } catch {
     return ''
+  }
+}
+
+/**
+ * Resolve the content tab to control. Prefer ?tabId= from the opener, then the
+ * most recently focused http(s) tab — never the control panel tab itself.
+ */
+async function resolveContentTab(): Promise<chrome.tabs.Tab | undefined> {
+  const raw = new URLSearchParams(location.search).get('tabId')
+  if (raw) {
+    const id = Number(raw)
+    if (Number.isFinite(id) && id > 0) {
+      try {
+        const tab = await chrome.tabs.get(id)
+        if (tab.id !== undefined && hostnameFromUrl(tab.url)) return tab
+      } catch {
+        // Tab may have closed; fall through.
+      }
+    }
+  }
+  try {
+    const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] })
+    tabs.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))
+    return tabs[0]
+  } catch {
+    return undefined
   }
 }
 
@@ -50,20 +78,33 @@ function renderStatus(settings: UserSettings): void {
   pageEngine.className =
     settings.pageTranslationEngine === 'browser' || configured ? 'pill ok' : 'pill warn'
 
+  el<HTMLElement>('pairHint').textContent = languagePairLabel(
+    settings.sourceLang,
+    settings.targetLang,
+  )
+
+  const lensLabel = formatHotkeyLabel(settings.hotkey)
+  const pageLabel = formatHotkeyLabel(settings.pageTranslationHotkey)
+  el<HTMLElement>('hotkeyHint').textContent = lensLabel
+  el<HTMLElement>('pageHotkeyHint').textContent = pageLabel
+
   const auto = el<HTMLInputElement>('autoToggle')
   auto.checked = settings.autoTranslate
   el<HTMLElement>('modeDesc').textContent = settings.autoTranslate
-    ? '开：进入页面会预译可见区（可能较慢）'
-    : '关：仅透镜对准的块才翻译（推荐）'
+    ? '开：进入页面会预译可见区'
+    : '关：仅透镜对准的块才翻译'
+
+  const selection = el<HTMLInputElement>('selectionToggle')
+  selection.checked = settings.selectionTranslate
+  el<HTMLElement>('selectionDesc').textContent = settings.selectionTranslate
+    ? '开：选中文字即显示译文'
+    : '关：不影响透镜与整页'
 
   const pageAuto = el<HTMLInputElement>('pageAutoToggle')
   pageAuto.checked = settings.autoPageTranslation
   el<HTMLElement>('pageAutoDesc').textContent = settings.autoPageTranslation
-    ? '开：识别到英文页面后自动开启'
+    ? '开：匹配源语言时自动开启'
     : '关：使用快捷键手动开启'
-
-  const label = formatHotkeyLabel(settings.hotkey)
-  el<HTMLElement>('hotkeyHint').textContent = `${label}：按住临时显示 · 短按保持打开`
 
   const tip = el<HTMLElement>('unconfiguredTip')
   const needsExternal =
@@ -75,12 +116,8 @@ function renderStatus(settings: UserSettings): void {
     const miss = missingConfigFields(settings)
     tip.textContent = miss.length
       ? `尚未配置完整：请填写 ${miss.join('、')}`
-      : '尚未配置 API，请打开设置填写并保存。'
+      : '尚未配置外部 API，请打开设置填写并保存。'
   }
-
-  const pageHotkey = formatHotkeyLabel(settings.pageTranslationHotkey)
-  el<HTMLElement>('usageHint').textContent =
-    `${pageHotkey}：切换整页中英双语翻译。图片仍需要外部视觉模型。`
 }
 
 async function setHostnamePaused(hostname: string, paused: boolean): Promise<UserSettings> {
@@ -106,9 +143,11 @@ async function setHostnamePaused(hostname: string, paused: boolean): Promise<Use
   return loadSettings()
 }
 
-/** Toggle full-page translation in the active tab, injecting the script if the tab predates install. */
-async function togglePageTranslation(tabId: number): Promise<void> {
-  const message: TogglePageTranslationMsg = { type: 'toggle-page-translation' }
+async function sendToActiveTab<T>(
+  tabId: number,
+  message: unknown,
+  isResult: (value: unknown) => value is T,
+): Promise<T> {
   let response: unknown
   try {
     response = await chrome.tabs.sendMessage(tabId, message)
@@ -119,10 +158,8 @@ async function togglePageTranslation(tabId: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 120))
     response = await chrome.tabs.sendMessage(tabId, message)
   }
-  if (!isTogglePageTranslationResult(response)) {
-    throw new Error('页面翻译脚本未返回有效结果')
-  }
-  if (!response.ok) throw new Error(response.error)
+  if (!isResult(response)) throw new Error('页面脚本未返回有效结果')
+  return response
 }
 
 function isTogglePageTranslationResult(value: unknown): value is TogglePageTranslationResult {
@@ -131,46 +168,87 @@ function isTogglePageTranslationResult(value: unknown): value is TogglePageTrans
   return value.ok === false && 'error' in value && typeof value.error === 'string'
 }
 
+function isToggleLensResult(value: unknown): value is ToggleLensResult {
+  if (!value || typeof value !== 'object' || !('ok' in value)) return false
+  if (value.ok === true) {
+    return 'lensActive' in value && typeof value.lensActive === 'boolean'
+  }
+  return value.ok === false && 'error' in value && typeof value.error === 'string'
+}
+
+async function copyText(text: string): Promise<void> {
+  await navigator.clipboard.writeText(text)
+  const toast = el<HTMLElement>('copyToast')
+  toast.hidden = false
+  toast.textContent = `已复制：${text}`
+  window.setTimeout(() => {
+    toast.hidden = true
+  }, 1400)
+}
+
+function showError(err: unknown): void {
+  const error = el<HTMLElement>('error')
+  error.hidden = false
+  error.textContent = err instanceof Error ? err.message : String(err)
+}
+
 async function init(): Promise<void> {
   el<HTMLButtonElement>('openOptions').addEventListener('click', () => {
     void chrome.runtime.openOptionsPage()
   })
 
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+  const tab = await resolveContentTab()
   const hostname = hostnameFromUrl(tab?.url)
   const hostnameEl = el<HTMLElement>('hostname')
   const pauseToggle = el<HTMLInputElement>('pauseToggle')
   const autoToggle = el<HTMLInputElement>('autoToggle')
   const pageAutoToggle = el<HTMLInputElement>('pageAutoToggle')
-
+  const selectionToggle = el<HTMLInputElement>('selectionToggle')
   const translatePageBtn = el<HTMLButtonElement>('translatePage')
+  const toggleLensBtn = el<HTMLButtonElement>('toggleLens')
+
   if (tab?.id === undefined || !hostname) {
     translatePageBtn.disabled = true
+    toggleLensBtn.disabled = true
+    hostnameEl.textContent = '（未找到可控制的网页，请先打开普通 http/https 页面）'
+    pauseToggle.disabled = true
   } else {
     const tabId = tab.id
+    hostnameEl.textContent = hostname
+    pauseToggle.disabled = false
     translatePageBtn.addEventListener('click', async () => {
       try {
         el<HTMLElement>('error').hidden = true
-        await togglePageTranslation(tabId)
-        window.close()
+        const message: TogglePageTranslationMsg = { type: 'toggle-page-translation' }
+        const result = await sendToActiveTab(tabId, message, isTogglePageTranslationResult)
+        if (!result.ok) throw new Error(result.error)
       } catch (err) {
-        const error = el<HTMLElement>('error')
-        error.hidden = false
-        error.textContent = err instanceof Error ? err.message : String(err)
+        showError(err)
+      }
+    })
+    toggleLensBtn.addEventListener('click', async () => {
+      try {
+        el<HTMLElement>('error').hidden = true
+        const result = await sendToActiveTab(tabId, { type: 'toggle-lens' }, isToggleLensResult)
+        if (!result.ok) throw new Error(result.error)
+        el<HTMLElement>('toggleLensLabel').textContent = result.lensActive
+          ? '关闭翻译透镜'
+          : '开启翻译透镜'
+      } catch (err) {
+        showError(err)
       }
     })
   }
 
-  if (!hostname) {
-    hostnameEl.textContent = '（无法读取此页）'
-    pauseToggle.disabled = true
-  } else {
-    hostnameEl.textContent = hostname
-    pauseToggle.disabled = false
-  }
-
   let settings = await loadSettings()
   renderStatus(settings)
+
+  el<HTMLButtonElement>('copyLensHotkey').addEventListener('click', () => {
+    void copyText(formatHotkeyLabel(settings.hotkey)).catch(showError)
+  })
+  el<HTMLButtonElement>('copyPageHotkey').addEventListener('click', () => {
+    void copyText(formatHotkeyLabel(settings.pageTranslationHotkey)).catch(showError)
+  })
 
   if (hostname) {
     pauseToggle.checked = settings.pausedHostnames.includes(hostname)
@@ -181,9 +259,7 @@ async function init(): Promise<void> {
         renderStatus(settings)
       } catch (err) {
         pauseToggle.checked = !pauseToggle.checked
-        const error = el<HTMLElement>('error')
-        error.hidden = false
-        error.textContent = err instanceof Error ? err.message : String(err)
+        showError(err)
       }
     })
   }
@@ -197,9 +273,20 @@ async function init(): Promise<void> {
       renderStatus(settings)
     } catch (err) {
       autoToggle.checked = !autoToggle.checked
-      const error = el<HTMLElement>('error')
-      error.hidden = false
-      error.textContent = err instanceof Error ? err.message : String(err)
+      showError(err)
+    }
+  })
+
+  selectionToggle.addEventListener('change', async () => {
+    try {
+      el<HTMLElement>('error').hidden = true
+      const next: UserSettings = { ...settings, selectionTranslate: selectionToggle.checked }
+      await saveSettings(next)
+      settings = await loadSettings()
+      renderStatus(settings)
+    } catch (err) {
+      selectionToggle.checked = !selectionToggle.checked
+      showError(err)
     }
   })
 
@@ -215,9 +302,7 @@ async function init(): Promise<void> {
       renderStatus(settings)
     } catch (err) {
       pageAutoToggle.checked = !pageAutoToggle.checked
-      const error = el<HTMLElement>('error')
-      error.hidden = false
-      error.textContent = err instanceof Error ? err.message : String(err)
+      showError(err)
     }
   })
 }

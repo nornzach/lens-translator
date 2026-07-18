@@ -9,6 +9,7 @@ import {
   type UserSettings,
 } from '../shared/settings'
 import { formatHotkeyLabel, hotkeyFromKeyboardEvent, hotkeysEqual } from '../shared/hotkey'
+import { languagePairLabel } from '../shared/languages'
 import {
   PROVIDER_PRESETS,
   type ProviderId,
@@ -18,7 +19,7 @@ import {
   BrowserTranslator,
   type BrowserTranslatorAvailability,
 } from '../content/browser-translator'
-import type { TestConnectionResult } from '../shared/messages'
+import type { TestConnectionResult, TestVisionResult } from '../shared/messages'
 
 const browserTranslator = new BrowserTranslator()
 let browserCapability: BrowserTranslatorAvailability = 'unsupported'
@@ -148,6 +149,8 @@ function fillForm(s: UserSettings): void {
   setLanguageValue('sourceLang', s.sourceLang)
   setLanguageValue('targetLang', s.targetLang)
   el<HTMLInputElement>('autoTranslate').checked = s.autoTranslate
+  el<HTMLInputElement>('selectionTranslate').checked = s.selectionTranslate
+  el<HTMLInputElement>('showFloatingBubble').checked = s.showFloatingBubble
   el<HTMLSelectElement>('translationEngine').value = s.translationEngine
   el<HTMLSelectElement>('pageTranslationEngine').value = s.pageTranslationEngine
   el<HTMLInputElement>('autoPageTranslation').checked = s.autoPageTranslation
@@ -192,6 +195,8 @@ function readForm(stored: UserSettings): UserSettings {
     sourceLang: el<HTMLSelectElement>('sourceLang').value || DEFAULT_SETTINGS.sourceLang,
     targetLang: el<HTMLSelectElement>('targetLang').value || DEFAULT_SETTINGS.targetLang,
     autoTranslate: el<HTMLInputElement>('autoTranslate').checked,
+    selectionTranslate: el<HTMLInputElement>('selectionTranslate').checked,
+    showFloatingBubble: el<HTMLInputElement>('showFloatingBubble').checked,
     translationEngine: el<HTMLSelectElement>('translationEngine').value as TranslationEngine,
     pageTranslationEngine: el<HTMLSelectElement>('pageTranslationEngine')
       .value as TranslationEngine,
@@ -325,7 +330,10 @@ function renderBrowserCapability(
   const content = {
     checking: ['正在检测 Chrome 内置翻译', '正在检查 API 和当前语言对。'],
     available: ['Chrome 内置翻译已就绪', '当前语言对可直接在设备侧翻译。'],
-    downloadable: ['需要下载语言包', '点击下载并测试；完成后可自动翻译英文页面。'],
+    downloadable: [
+      '需要下载语言包',
+      '点击下载并测试；完成后即可用内置引擎翻译所选语言对。',
+    ],
     downloading: ['语言包正在下载', detail || '请保持此页面打开。'],
     unavailable: ['当前语言对不可用', '可更换语言代码，或将对应翻译引擎切换为外部 LLM。'],
     unsupported: [
@@ -440,6 +448,199 @@ function setupSectionNavigation(): void {
   for (const section of sections) observer.observe(section)
 }
 
+function isTestVisionResult(value: unknown): value is TestVisionResult {
+  if (!value || typeof value !== 'object') return false
+  const result = value as { type?: unknown; ok?: unknown; error?: unknown }
+  if (result.type !== 'test-vision-result') return false
+  return result.ok === true || (result.ok === false && typeof result.error === 'string')
+}
+
+async function runVisionTest(settings: UserSettings): Promise<void> {
+  const button = el<HTMLButtonElement>('testVision')
+  button.disabled = true
+  setTestStatus('正在测试图片能力…', 'testing')
+  try {
+    const response: unknown = await chrome.runtime.sendMessage({
+      type: 'test-vision',
+      baseURL: settings.baseURL,
+      apiKey: settings.apiKey,
+      model: settings.model,
+      provider: settings.provider,
+      reasoningPref: settings.reasoningPref,
+    })
+    if (isTestVisionResult(response) && response.ok) {
+      setTestStatus('图片能力可用 · 当前模型接受 image_url', 'ok')
+    } else {
+      const error = isTestVisionResult(response) && !response.ok ? response.error : '未知错误'
+      setTestStatus(`图片能力不可用：${error}`, 'error')
+    }
+  } catch (err) {
+    setTestStatus(`图片测试失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+  } finally {
+    button.disabled = false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// First-run 3-step onboarding
+// ---------------------------------------------------------------------------
+
+let onboardingStep = 1
+
+function showOnboarding(show: boolean): void {
+  el<HTMLElement>('onboarding').hidden = !show
+}
+
+function renderOnboardingStep(): void {
+  for (const step of document.querySelectorAll<HTMLElement>('#onboardingSteps li')) {
+    const n = Number(step.dataset.step)
+    step.classList.toggle('active', n === onboardingStep)
+    step.classList.toggle('done', n < onboardingStep)
+  }
+  for (const panel of document.querySelectorAll<HTMLElement>('.onboarding-panel')) {
+    panel.hidden = Number(panel.dataset.panel) !== onboardingStep
+  }
+  el<HTMLButtonElement>('onboardBack').hidden = onboardingStep <= 1
+  el<HTMLButtonElement>('onboardNext').textContent =
+    onboardingStep >= 3 ? '完成并开始使用' : '下一步'
+}
+
+async function refreshOnboardBrowserStatus(): Promise<void> {
+  const source = el<HTMLSelectElement>('onboardSource').value || DEFAULT_SETTINGS.sourceLang
+  const target = el<HTMLSelectElement>('onboardTarget').value || DEFAULT_SETTINGS.targetLang
+  const status = el<HTMLElement>('onboardBrowserStatus')
+  const pair = languagePairLabel(source, target)
+  if (!browserTranslator.isSupported()) {
+    status.textContent = `当前环境无 Translator API。可跳过并用外部 LLM（${pair}）。`
+    return
+  }
+  const availability = await browserTranslator.availability(source, target)
+  if (availability === 'available') {
+    status.textContent = `${pair} 语言包已就绪。`
+  } else if (availability === 'downloadable' || availability === 'downloading') {
+    status.textContent = `${pair} 需要下载语言包，可点下方按钮。`
+  } else {
+    status.textContent = `${pair} 在 Chrome 内置翻译中不可用，请更换语言或使用外部 LLM。`
+  }
+}
+
+async function completeOnboarding(stored: UserSettings, partial?: Partial<UserSettings>): Promise<UserSettings> {
+  const next: UserSettings = {
+    ...stored,
+    ...partial,
+    onboardingCompleted: true,
+  }
+  await saveSettings(next)
+  showOnboarding(false)
+  return loadSettings()
+}
+
+function setupOnboarding(getStored: () => UserSettings, setStored: (s: UserSettings) => void): void {
+  const sourceSelect = el<HTMLSelectElement>('onboardSource')
+  const targetSelect = el<HTMLSelectElement>('onboardTarget')
+  sourceSelect.replaceChildren(
+    ...LANGUAGE_OPTIONS.map(([code, name]) => {
+      const option = document.createElement('option')
+      option.value = code
+      option.textContent = `${name} · ${code}`
+      return option
+    }),
+  )
+  targetSelect.replaceChildren(
+    ...LANGUAGE_OPTIONS.map(([code, name]) => {
+      const option = document.createElement('option')
+      option.value = code
+      option.textContent = `${name} · ${code}`
+      return option
+    }),
+  )
+
+  const syncFromStored = () => {
+    const s = getStored()
+    sourceSelect.value = s.sourceLang
+    targetSelect.value = s.targetLang
+    el<HTMLInputElement>('onboardBaseURL').value = s.baseURL
+    el<HTMLInputElement>('onboardModel').value = s.model
+    el<HTMLElement>('onboardHotkeys').innerHTML = `
+      <li><strong>点击扩展图标</strong>：开关翻译透镜（无需键盘）</li>
+      <li><strong>${formatHotkeyLabel(s.hotkey)}</strong>：按住临时查看，短按保持打开</li>
+      <li><strong>${formatHotkeyLabel(s.pageTranslationHotkey)}</strong>：切换整页双语</li>
+      <li><strong>划词翻译</strong>：选中文本即出译文（默认开启）</li>
+      <li>右键扩展图标可打开快捷控制面板与完整设置</li>
+    `
+    void refreshOnboardBrowserStatus()
+  }
+
+  sourceSelect.addEventListener('change', () => void refreshOnboardBrowserStatus())
+  targetSelect.addEventListener('change', () => void refreshOnboardBrowserStatus())
+
+  el<HTMLButtonElement>('onboardDownloadPack').addEventListener('click', async () => {
+    const source = sourceSelect.value
+    const target = targetSelect.value
+    const status = el<HTMLElement>('onboardBrowserStatus')
+    status.textContent = '正在下载语言包…'
+    const ready = await browserTranslator.prepare(source, target, (p) => {
+      status.textContent = `语言包下载 ${Math.round(p * 100)}%`
+    })
+    status.textContent = ready
+      ? `${languagePairLabel(source, target)} 已就绪。`
+      : '下载失败，请检查网络或改用外部 LLM。'
+    void checkBrowserCapability()
+  })
+
+  el<HTMLButtonElement>('onboardSkip').addEventListener('click', async () => {
+    setStored(await completeOnboarding(getStored()))
+    fillForm(getStored())
+  })
+
+  el<HTMLButtonElement>('onboardBack').addEventListener('click', () => {
+    onboardingStep = Math.max(1, onboardingStep - 1)
+    renderOnboardingStep()
+  })
+
+  el<HTMLButtonElement>('onboardNext').addEventListener('click', async () => {
+    if (onboardingStep === 1) {
+      const next = {
+        ...getStored(),
+        sourceLang: sourceSelect.value || DEFAULT_SETTINGS.sourceLang,
+        targetLang: targetSelect.value || DEFAULT_SETTINGS.targetLang,
+      }
+      await saveSettings(next)
+      setStored(await loadSettings())
+      fillForm(getStored())
+      onboardingStep = 2
+      renderOnboardingStep()
+      return
+    }
+    if (onboardingStep === 2) {
+      const baseURL = el<HTMLInputElement>('onboardBaseURL').value.trim()
+      const apiKey = el<HTMLInputElement>('onboardApiKey').value.trim()
+      const model = el<HTMLInputElement>('onboardModel').value.trim()
+      if (baseURL || apiKey || model) {
+        const next = {
+          ...getStored(),
+          baseURL: baseURL || getStored().baseURL,
+          apiKey: apiKey || getStored().apiKey,
+          model: model || getStored().model,
+        }
+        await saveSettings(next)
+        setStored(await loadSettings())
+        fillForm(getStored())
+      }
+      onboardingStep = 3
+      syncFromStored()
+      renderOnboardingStep()
+      return
+    }
+    setStored(await completeOnboarding(getStored()))
+    fillForm(getStored())
+    setStatus('向导完成 · 点击扩展图标即可开始翻译', true)
+  })
+
+  syncFromStored()
+  renderOnboardingStep()
+}
+
 async function init(): Promise<void> {
   populateLanguageSelects()
   let stored = await loadSettings()
@@ -448,6 +649,21 @@ async function init(): Promise<void> {
   setupSectionNavigation()
   setupHotkeyCapture('hotkey', 'captureHotkey', 'captureHint')
   setupHotkeyCapture('pageHotkey', 'capturePageHotkey', 'capturePageHint')
+  setupOnboarding(
+    () => stored,
+    (s) => {
+      stored = s
+    },
+  )
+
+  const forceOnboarding =
+    location.hash === '#onboarding' ||
+    new URLSearchParams(location.search).get('onboarding') === '1'
+  if (!stored.onboardingCompleted || forceOnboarding) {
+    showOnboarding(true)
+    if (forceOnboarding) history.replaceState(null, '', location.pathname)
+  }
+
   el<HTMLInputElement>('pageTranslationUseCustomColor').addEventListener(
     'change',
     updateStyleControlStates,
@@ -488,13 +704,13 @@ async function init(): Promise<void> {
         next.translationEngine === 'external' || next.pageTranslationEngine === 'external'
       const missing = usesExternal ? missingConfigFields(next) : []
       if (missing.length) {
-        await saveSettings(next)
+        await saveSettings({ ...next, onboardingCompleted: true })
         stored = await loadSettings()
         fillForm(stored)
         setStatus(`已保存，但尚未完成配置：请填写 ${missing.join('、')}`, false)
         return
       }
-      await saveSettings(next)
+      await saveSettings({ ...next, onboardingCompleted: true })
       stored = await loadSettings()
       fillForm(stored)
       const usesBrowser =
@@ -505,11 +721,11 @@ async function init(): Promise<void> {
         usesBrowser &&
         (browserCapability === 'downloadable' || browserCapability === 'downloading')
       ) {
-        setStatus('已保存 · 使用自动翻译前，请先在 Chrome 能力区下载语言包。', false)
+        setStatus('已保存 · 使用内置翻译前，请先在 Chrome 能力区下载语言包。', false)
       } else if (isConfigured(stored)) {
         setStatus('已保存 · 已同步到打开的网页。', true)
       } else if (!usesExternal) {
-        setStatus('已保存 · Chrome 内置翻译已就绪。', true)
+        setStatus('已保存 · Chrome 内置翻译模式已启用。', true)
       } else {
         setStatus('保存后校验失败，请重新填写 API Key 并保存。', false)
       }
@@ -521,10 +737,13 @@ async function init(): Promise<void> {
   el<HTMLButtonElement>('testConnection').addEventListener('click', () => {
     void runConnectionTest(readForm(stored))
   })
+  el<HTMLButtonElement>('testVision').addEventListener('click', () => {
+    void runVisionTest(readForm(stored))
+  })
 
   el<HTMLButtonElement>('reset').addEventListener('click', async () => {
     if (!confirm('确定恢复默认？API Key 会被清空。')) return
-    await saveSettings({ ...DEFAULT_SETTINGS })
+    await saveSettings({ ...DEFAULT_SETTINGS, onboardingCompleted: true })
     location.reload()
   })
 }

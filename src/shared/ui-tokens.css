@@ -1,0 +1,86 @@
+/**
+ * Shared design tokens for Lens Translator extension surfaces
+ * (options, control panel, floating bubble). Lens overlay uses a subset inline.
+ */
+:root {
+  color-scheme: light;
+  --lt-font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --lt-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --lt-page: #f4f6f9;
+  --lt-surface: #ffffff;
+  --lt-surface-2: #f0f3f7;
+  --lt-surface-3: #e8edf3;
+  --lt-text: #141820;
+  --lt-text-2: #5b6472;
+  --lt-text-3: #8b93a0;
+  --lt-border: #e2e7ee;
+  --lt-border-strong: #c9d1dc;
+
+  --lt-accent: #1769e0;
+  --lt-accent-hover: #1258bd;
+  --lt-accent-soft: #e8f1fc;
+  --lt-accent-ink: #0c3d8a;
+
+  --lt-teal: #0f9b8e;
+  --lt-teal-soft: #e6f7f5;
+  --lt-ok: #157a45;
+  --lt-ok-soft: #e6f6ed;
+  --lt-warn: #9a5b08;
+  --lt-warn-soft: #fff6e5;
+  --lt-danger: #b42318;
+  --lt-danger-soft: #fdecea;
+
+  --lt-radius-sm: 8px;
+  --lt-radius: 12px;
+  --lt-radius-lg: 16px;
+  --lt-radius-pill: 999px;
+
+  --lt-shadow-sm: 0 1px 2px rgb(15 23 42 / 5%);
+  --lt-shadow: 0 8px 28px rgb(15 23 42 / 10%);
+  --lt-shadow-lg: 0 18px 48px rgb(15 23 42 / 14%);
+
+  --lt-focus: 0 0 0 3px rgb(23 105 224 / 18%);
+  --lt-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --lt-duration: 180ms;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --lt-page: #0f1115;
+    --lt-surface: #181b21;
+    --lt-surface-2: #22262e;
+    --lt-surface-3: #2b303a;
+    --lt-text: #f2f4f7;
+    --lt-text-2: #a8b0bd;
+    --lt-text-3: #7b8494;
+    --lt-border: #2e3440;
+    --lt-border-strong: #3d4554;
+
+    --lt-accent: #4d8ef0;
+    --lt-accent-hover: #6aa0f3;
+    --lt-accent-soft: #1a2740;
+    --lt-accent-ink: #b6d0ff;
+
+    --lt-teal: #2dd4bf;
+    --lt-teal-soft: #143532;
+    --lt-ok: #3ecf8e;
+    --lt-ok-soft: #143528;
+    --lt-warn: #f0b429;
+    --lt-warn-soft: #3a2e12;
+    --lt-danger: #f07167;
+    --lt-danger-soft: #3a1c1a;
+
+    --lt-shadow-sm: 0 1px 2px rgb(0 0 0 / 35%);
+    --lt-shadow: 0 10px 32px rgb(0 0 0 / 40%);
+    --lt-shadow-lg: 0 20px 50px rgb(0 0 0 / 48%);
+    --lt-focus: 0 0 0 3px rgb(77 142 240 / 28%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --lt-duration: 1ms;
+  }
+}

@@ -4,15 +4,68 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Lens Translator 设置</title>
+    <link rel="stylesheet" href="../shared/ui-tokens.css" />
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
+    <div id="onboarding" class="onboarding" hidden>
+      <div class="onboarding-card" role="dialog" aria-modal="true" aria-labelledby="onboardingTitle">
+        <p class="eyebrow">快速上手 · 3 步</p>
+        <h2 id="onboardingTitle">欢迎使用 Lens Translator</h2>
+        <p class="onboarding-lead" id="onboardingLead">
+          默认使用 Chrome 内置翻译（零配置）。也可随时改用外部 LLM。
+        </p>
+        <ol class="onboarding-steps" id="onboardingSteps">
+          <li data-step="1" class="active">
+            <strong>选择语言</strong>
+            <span>设置源语言与目标语言，并确认 Chrome 语言包就绪。</span>
+          </li>
+          <li data-step="2">
+            <strong>可选：外部 LLM</strong>
+            <span>需要更高质量或图片翻译时，填写兼容 OpenAI 的接口。</span>
+          </li>
+          <li data-step="3">
+            <strong>开始翻译</strong>
+            <span>点击扩展图标开关透镜，或使用快捷键 / 划词翻译。</span>
+          </li>
+        </ol>
+        <div class="onboarding-panel" data-panel="1">
+          <div class="onboarding-pair">
+            <label>源语言<select id="onboardSource"></select></label>
+            <span aria-hidden="true">→</span>
+            <label>目标语言<select id="onboardTarget"></select></label>
+          </div>
+          <p class="onboarding-status" id="onboardBrowserStatus">正在检测 Chrome 内置翻译…</p>
+          <button type="button" class="button secondary" id="onboardDownloadPack">下载语言包</button>
+        </div>
+        <div class="onboarding-panel" data-panel="2" hidden>
+          <p class="muted">跳过可继续使用 Chrome 内置。图片翻译始终需要外部多模态模型。</p>
+          <label class="field-block">Base URL<input id="onboardBaseURL" type="text" placeholder="https://api.openai.com/v1" /></label>
+          <label class="field-block">API Key<input id="onboardApiKey" type="password" placeholder="sk-..." /></label>
+          <label class="field-block">模型<input id="onboardModel" type="text" placeholder="gpt-4o-mini" /></label>
+        </div>
+        <div class="onboarding-panel" data-panel="3" hidden>
+          <ul class="hotkey-list" id="onboardHotkeys">
+            <li>点击扩展图标：开关翻译透镜</li>
+            <li>透镜快捷键：按住临时查看，短按保持打开</li>
+            <li>整页快捷键：切换双语对照</li>
+            <li>划词翻译：选中文本即出译文（可在设置关闭）</li>
+          </ul>
+        </div>
+        <div class="onboarding-actions">
+          <button type="button" class="button ghost" id="onboardSkip">跳过向导</button>
+          <button type="button" class="button secondary" id="onboardBack" hidden>上一步</button>
+          <button type="button" class="button primary" id="onboardNext">下一步</button>
+        </div>
+      </div>
+    </div>
+
     <header class="topbar">
       <div class="brand-lockup">
         <span class="brand-mark" aria-hidden="true">L</span>
         <div class="brand-copy">
           <strong>Lens Translator</strong>
-          <span>翻译工作台</span>
+          <span>多语言翻译工作台</span>
         </div>
       </div>
       <div class="engine-summary" aria-live="polite">
@@ -40,7 +93,7 @@
         <div class="content-heading">
           <p class="eyebrow">PREFERENCES</p>
           <h1>设置</h1>
-          <p id="helpHotkey">配置翻译方式、自动行为和页面呈现。</p>
+          <p id="helpHotkey">配置任意语言对、引擎与页面呈现。</p>
         </div>
 
         <form id="settings-form" autocomplete="off">
@@ -48,14 +101,14 @@
             <header class="section-heading">
               <div>
                 <h2>基础翻译</h2>
-                <p>控制翻译透镜的语言、引擎和交互方式。</p>
+                <p>控制翻译透镜的语言、引擎和交互方式。默认使用 Chrome 内置翻译。</p>
               </div>
             </header>
 
             <div class="setting-row">
               <div class="setting-copy">
                 <h3>翻译语言</h3>
-                <p>从 Chrome 内置翻译支持的语言中选择；列表同时显示 BCP 47 代码。</p>
+                <p>任意源语言 → 目标语言。列表显示名称与 BCP 47 代码；Chrome 内置模式需语言包就绪。</p>
               </div>
               <div class="control language-pair">
                 <label>
@@ -73,14 +126,26 @@
             <div class="setting-row">
               <div class="setting-copy">
                 <h3>透镜文本引擎</h3>
-                <p>两种引擎互不兜底，失败时会显示所选引擎的具体状态。</p>
+                <p>两种引擎互不兜底。默认 Chrome 内置；失败时会提示下载语言包或改用外部 LLM。</p>
               </div>
               <div class="control">
                 <select id="translationEngine" name="translationEngine">
-                  <option value="external">外部 LLM</option>
                   <option value="browser">Chrome 内置翻译</option>
+                  <option value="external">外部 LLM</option>
                 </select>
               </div>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>划词翻译</h3>
+                <p>开启后，选中页面文字即显示译文浮层；取消选择立即消失。不影响透镜与整页模式。</p>
+              </div>
+              <label class="switch-control">
+                <input id="selectionTranslate" name="selectionTranslate" type="checkbox" />
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-label">启用</span>
+              </label>
             </div>
 
             <div class="setting-row">
@@ -92,6 +157,18 @@
                 <input id="autoTranslate" name="autoTranslate" type="checkbox" />
                 <span class="switch-track" aria-hidden="true"></span>
                 <span class="switch-label">启用</span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>页面悬浮气泡</h3>
+                <p>网页右侧的快捷控制条。关闭后仍可通过扩展图标、快捷键与设置页操作。</p>
+              </div>
+              <label class="switch-control">
+                <input id="showFloatingBubble" name="showFloatingBubble" type="checkbox" />
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-label">显示</span>
               </label>
             </div>
 
@@ -148,10 +225,10 @@
             <div class="setting-row emphasized-row">
               <div class="setting-copy">
                 <div class="title-with-badge">
-                  <h3>英文页面自动开启</h3>
+                  <h3>匹配源语言时自动整页</h3>
                   <span class="small-badge">全局</span>
                 </div>
-                <p>页面识别为英文后自动启动整页双语。站点暂停规则仍然优先。</p>
+                <p>检测到页面主要语言与源语言一致时，自动启动整页双语。站点暂停规则仍然优先。</p>
                 <p class="privacy-warning">选择外部 LLM 时，匹配到的页面文本会自动发送到所配置服务。</p>
               </div>
               <label class="switch-control">
@@ -357,10 +434,11 @@
             <div class="setting-row">
               <div class="setting-copy">
                 <h3>连通性测试</h3>
-                <p>使用当前填写的接口、模型和密钥发送一次最小请求，验证是否可用。</p>
+                <p>文本：发送一次最小翻译请求。图片：探测模型是否支持 image_url 多模态输入。</p>
               </div>
               <div class="control test-connection-control">
-                <button type="button" id="testConnection" class="button secondary">测试连接</button>
+                <button type="button" id="testConnection" class="button secondary">测试文本</button>
+                <button type="button" id="testVision" class="button secondary">测试图片能力</button>
                 <span id="testConnectionStatus" class="test-connection-status" role="status" aria-live="polite"></span>
               </div>
             </div>
@@ -370,13 +448,13 @@
             <header class="section-heading">
               <div>
                 <h2>网站管理</h2>
-                <p>暂停的网站不会启动透镜、自动预译或整页翻译。</p>
+                <p>暂停的网站不会启动透镜、划词、自动预译或整页翻译。</p>
               </div>
             </header>
             <div class="setting-row">
               <div class="setting-copy">
                 <h3>暂停名单</h3>
-                <p>输入主机名并用逗号分隔，也可在扩展弹窗中暂停当前网站。</p>
+                <p>输入主机名并用逗号分隔；也可在快捷控制面板中暂停当前网站。</p>
               </div>
               <div class="control">
                 <input

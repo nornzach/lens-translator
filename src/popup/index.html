@@ -3,108 +3,96 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Lens Translator</title>
+    <title>Lens Translator 控制面板</title>
+    <link rel="stylesheet" href="../shared/ui-tokens.css" />
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <svg class="svg-filters" aria-hidden="true" width="0" height="0">
-      <defs>
-        <filter
-          id="glass-distortion"
-          x="-20%"
-          y="-20%"
-          width="140%"
-          height="140%"
-          color-interpolation-filters="sRGB"
-        >
-          <feTurbulence
-            type="fractalNoise"
-            baseFrequency="0.008 0.008"
-            numOctaves="2"
-            seed="3"
-            result="noise"
-          />
-          <feGaussianBlur in="noise" stdDeviation="0.5" result="softNoise" />
-          <feDisplacementMap
-            in="SourceGraphic"
-            in2="softNoise"
-            scale="10"
-            xChannelSelector="R"
-            yChannelSelector="G"
-          />
-        </filter>
-      </defs>
-    </svg>
-
     <div class="shell">
-      <div class="liquidGlass-wrapper popup-shell">
-        <div class="liquidGlass-effect"></div>
-        <div class="liquidGlass-tint"></div>
-        <div class="liquidGlass-shine"></div>
-
-        <div class="liquidGlass-text popup-inner">
-          <header class="header">
-            <div class="brand">
-              <span class="logo" aria-hidden="true"></span>
-              <div>
-                <h1>Lens</h1>
-                <p class="subtitle" id="hotkeyHint">按住快捷键偷看中文</p>
-              </div>
-            </div>
-          </header>
-
-          <section class="menu-item card">
-            <div class="row">
-              <span class="label">当前站点</span>
-              <span id="hostname" class="value mono">—</span>
-            </div>
-            <label class="switch-row menu-item nested">
-              <span class="switch-text">暂停此站</span>
-              <input id="pauseToggle" type="checkbox" class="switch" disabled />
-            </label>
-          </section>
-
-          <section class="menu-item card">
-            <div class="row">
-              <span class="label">透镜引擎</span>
-              <span id="apiStatus" class="pill">…</span>
-            </div>
-            <div class="row">
-              <span class="label">整页引擎</span>
-              <span id="pageEngineStatus" class="pill">…</span>
-            </div>
-            <label class="switch-row menu-item nested">
-              <div class="switch-text-block">
-                <span class="switch-text">自动预译可见区</span>
-                <span class="switch-desc" id="modeDesc">关：仅透镜下的块才翻译</span>
-              </div>
-              <input id="autoToggle" type="checkbox" class="switch" />
-            </label>
-            <label class="switch-row menu-item nested">
-              <div class="switch-text-block">
-                <span class="switch-text">英文页自动双语</span>
-                <span class="switch-desc" id="pageAutoDesc">关：使用快捷键手动开启</span>
-              </div>
-              <input id="pageAutoToggle" type="checkbox" class="switch" />
-            </label>
-          </section>
-
-          <p class="hint" id="usageHint">
-            默认按需翻译并缓存；相同句子只译一次。
-          </p>
-
-          <button type="button" id="translatePage" class="btn primary menu-item">
-            <span>翻译此页（中英双语）</span>
-          </button>
-
-          <button type="button" id="openOptions" class="btn menu-item">
-            <span>打开设置</span>
-          </button>
-
-          <p id="unconfiguredTip" class="tip" hidden></p>
-          <p id="error" class="error" hidden></p>
+      <header class="header">
+        <div class="brand">
+          <span class="logo" aria-hidden="true">L</span>
+          <div>
+            <h1>Lens Translator</h1>
+            <p class="subtitle" id="pairHint">多语言按需翻译</p>
+          </div>
         </div>
+      </header>
+
+      <section class="card hotkey-card" aria-label="快捷键">
+        <div class="row">
+          <span class="label">透镜</span>
+          <button type="button" class="hotkey-chip" id="copyLensHotkey" title="点击复制">
+            <span id="hotkeyHint">—</span>
+          </button>
+        </div>
+        <div class="row">
+          <span class="label">整页</span>
+          <button type="button" class="hotkey-chip" id="copyPageHotkey" title="点击复制">
+            <span id="pageHotkeyHint">—</span>
+          </button>
+        </div>
+        <p class="hint tight">点击扩展图标也可开关透镜 · 点击芯片复制快捷键</p>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <span class="label">当前站点</span>
+          <span id="hostname" class="value mono">—</span>
+        </div>
+        <label class="switch-row">
+          <span class="switch-text">暂停此站</span>
+          <input id="pauseToggle" type="checkbox" class="switch" disabled />
+        </label>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <span class="label">透镜引擎</span>
+          <span id="apiStatus" class="pill">…</span>
+        </div>
+        <div class="row">
+          <span class="label">整页引擎</span>
+          <span id="pageEngineStatus" class="pill">…</span>
+        </div>
+        <label class="switch-row">
+          <div class="switch-text-block">
+            <span class="switch-text">划词翻译</span>
+            <span class="switch-desc" id="selectionDesc">开：选中文字即显示译文</span>
+          </div>
+          <input id="selectionToggle" type="checkbox" class="switch" />
+        </label>
+        <label class="switch-row">
+          <div class="switch-text-block">
+            <span class="switch-text">自动预译可见区</span>
+            <span class="switch-desc" id="modeDesc">关：仅透镜下的块才翻译</span>
+          </div>
+          <input id="autoToggle" type="checkbox" class="switch" />
+        </label>
+        <label class="switch-row">
+          <div class="switch-text-block">
+            <span class="switch-text">匹配源语言时自动整页</span>
+            <span class="switch-desc" id="pageAutoDesc">关：使用快捷键手动开启</span>
+          </div>
+          <input id="pageAutoToggle" type="checkbox" class="switch" />
+        </label>
+      </section>
+
+      <div class="actions">
+        <button type="button" id="toggleLens" class="btn primary">
+          <span id="toggleLensLabel">开启翻译透镜</span>
+        </button>
+        <button type="button" id="translatePage" class="btn secondary">
+          <span>切换整页双语</span>
+        </button>
+        <button type="button" id="openOptions" class="btn ghost">
+          <span>打开完整设置</span>
+        </button>
       </div>
+
+      <p id="unconfiguredTip" class="tip" hidden></p>
+      <p id="error" class="error" hidden></p>
+      <p id="copyToast" class="hint" hidden>已复制</p>
     </div>
     <script type="module" src="./main.ts"></script>
   </body>

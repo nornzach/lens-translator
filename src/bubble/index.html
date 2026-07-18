@@ -4,10 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Lens Translator 快捷控制</title>
+    <link rel="stylesheet" href="../shared/ui-tokens.css" />
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <button class="orb" id="orb" type="button" title="固定展开 Lens Translator">
+    <button class="orb" id="orb" type="button" title="展开 Lens Translator">
       <span class="orb-icon" data-icon="languages"></span>
       <span class="orb-state" id="orbState"></span>
     </button>
@@ -31,7 +32,7 @@
         <section class="quick-actions" aria-label="翻译控制">
           <button class="action-button" id="pageAction" type="button">
             <span class="action-icon" data-icon="scan-text"></span>
-            <span><strong>整页翻译</strong><small id="pageActionState">已关闭</small></span>
+            <span><strong>整页双语</strong><small id="pageActionState">已关闭</small></span>
           </button>
           <button class="action-button" id="lensAction" type="button">
             <span class="action-icon" data-icon="focus"></span>
@@ -39,67 +40,77 @@
           </button>
         </section>
 
-        <section class="control-section">
+        <section class="control-section engines">
           <div class="section-title"><span data-icon="bot"></span><strong>翻译引擎</strong></div>
           <div class="engine-row">
             <span>透镜</span>
             <div class="segmented" data-engine-scope="lens">
-              <button type="button" data-engine="external">外部 LLM</button>
               <button type="button" data-engine="browser">Chrome</button>
+              <button type="button" data-engine="external">外部 LLM</button>
             </div>
           </div>
           <div class="engine-row">
             <span>整页</span>
             <div class="segmented" data-engine-scope="page">
-              <button type="button" data-engine="external">外部 LLM</button>
               <button type="button" data-engine="browser">Chrome</button>
+              <button type="button" data-engine="external">外部 LLM</button>
             </div>
           </div>
         </section>
 
-        <section class="control-section">
-          <div class="section-title"><span data-icon="palette"></span><strong>译文样式</strong></div>
-          <div class="form-grid compact">
-            <label class="field">
-              <span>字体</span>
-              <select id="fontFamily">
-                <option value="system">跟随页面</option>
-                <option value="sans">现代无衬线</option>
-                <option value="serif">阅读衬线</option>
-                <option value="mono">等宽字体</option>
-              </select>
-            </label>
-            <label class="field size-field">
-              <span>字号 <output id="fontSizeValue">14px</output></span>
-              <input id="fontSize" type="range" min="10" max="32" step="1" />
-            </label>
-          </div>
+        <details class="collapsible">
+          <summary>
+            <span data-icon="palette"></span>
+            <strong>译文样式</strong>
+            <span data-icon="chevron"></span>
+          </summary>
+          <div class="collapsible-body">
+            <div class="form-grid compact">
+              <label class="field">
+                <span>字体</span>
+                <select id="fontFamily">
+                  <option value="system">跟随页面</option>
+                  <option value="sans">现代无衬线</option>
+                  <option value="serif">阅读衬线</option>
+                  <option value="mono">等宽字体</option>
+                </select>
+              </label>
+              <label class="field size-field">
+                <span>字号 <output id="fontSizeValue">14px</output></span>
+                <input id="fontSize" type="range" min="10" max="32" step="1" />
+              </label>
+            </div>
 
-          <div class="style-tools">
-            <button class="format-button" id="bold" type="button" title="加粗" aria-pressed="false">B</button>
-            <button class="format-button italic" id="italic" type="button" title="斜体" aria-pressed="false">I</button>
-            <button class="format-button underline" id="underline" type="button" title="下划线" aria-pressed="false">U</button>
-            <label class="color-tool" title="译文颜色">
-              <input id="useTextColor" type="checkbox" />
-              <span data-icon="type"></span>
-              <input id="textColor" type="color" />
-            </label>
-            <label class="color-tool" title="译文背景">
-              <input id="useBackground" type="checkbox" />
-              <span data-icon="paint-bucket"></span>
-              <input id="backgroundColor" type="color" />
-            </label>
-          </div>
+            <div class="style-tools">
+              <button class="format-button" id="bold" type="button" title="加粗" aria-pressed="false">B</button>
+              <button class="format-button italic" id="italic" type="button" title="斜体" aria-pressed="false">I</button>
+              <button class="format-button underline" id="underline" type="button" title="下划线" aria-pressed="false">U</button>
+              <label class="color-tool" title="译文颜色">
+                <input id="useTextColor" type="checkbox" />
+                <span data-icon="type"></span>
+                <input id="textColor" type="color" />
+              </label>
+              <label class="color-tool" title="译文背景">
+                <input id="useBackground" type="checkbox" />
+                <span data-icon="paint-bucket"></span>
+                <input id="backgroundColor" type="color" />
+              </label>
+            </div>
 
-          <div class="preview-shell">
-            <span>Preview</span>
-            <p id="stylePreview">沉浸阅读，也可以清晰而轻盈。</p>
+            <div class="preview-shell">
+              <span>预览</span>
+              <p id="stylePreview">译文样式会即时应用到整页双语与透镜。</p>
+            </div>
           </div>
-        </section>
+        </details>
 
-        <details class="llm-section">
-          <summary><span data-icon="key"></span><strong>外部 LLM 快捷配置</strong><span data-icon="chevron"></span></summary>
-          <div class="llm-fields">
+        <details class="collapsible">
+          <summary>
+            <span data-icon="key"></span>
+            <strong>外部 LLM</strong>
+            <span data-icon="chevron"></span>
+          </summary>
+          <div class="collapsible-body llm-fields">
             <label class="field full"><span>Base URL</span><input id="baseURL" type="url" autocomplete="url" /></label>
             <label class="field full"><span>API Key</span><input id="apiKey" type="password" autocomplete="new-password" /></label>
             <div class="form-grid">
@@ -115,7 +126,7 @@
             </div>
             <div class="llm-actions">
               <button class="secondary-button" id="testConnection" type="button"><span data-icon="activity"></span>测试</button>
-              <button class="primary-button" id="saveLlm" type="button"><span data-icon="save"></span>保存配置</button>
+              <button class="primary-button" id="saveLlm" type="button"><span data-icon="save"></span>保存</button>
             </div>
           </div>
         </details>

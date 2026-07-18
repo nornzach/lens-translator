@@ -8,13 +8,16 @@ import {
 } from '../../src/shared/settings-defaults'
 
 describe('DEFAULT_SETTINGS', () => {
-  it('defaults to en→zh with on-demand translate (auto off)', () => {
+  it('defaults to Chrome engines, selection translate, and on-demand lens (auto off)', () => {
     expect(DEFAULT_SETTINGS.sourceLang).toBe('en')
     expect(DEFAULT_SETTINGS.targetLang).toBe('zh')
     expect(DEFAULT_SETTINGS.autoTranslate).toBe(false)
-    expect(DEFAULT_SETTINGS.translationEngine).toBe('external')
+    expect(DEFAULT_SETTINGS.translationEngine).toBe('browser')
     expect(DEFAULT_SETTINGS.pageTranslationEngine).toBe('browser')
     expect(DEFAULT_SETTINGS.autoPageTranslation).toBe(false)
+    expect(DEFAULT_SETTINGS.selectionTranslate).toBe(true)
+    expect(DEFAULT_SETTINGS.showFloatingBubble).toBe(true)
+    expect(DEFAULT_SETTINGS.onboardingCompleted).toBe(false)
     expect(DEFAULT_SETTINGS.pageTranslationFontFamily).toBe('system')
     expect(DEFAULT_SETTINGS.pageTranslationFontSizePx).toBe(14)
     expect(DEFAULT_SETTINGS.pageTranslationUseCustomColor).toBe(false)
@@ -45,12 +48,20 @@ describe('mergeSettings', () => {
     const merged = mergeSettings({ apiKey: 'sk-test' })
     expect(merged.apiKey).toBe('sk-test')
     expect(merged.autoTranslate).toBe(false)
-    expect(merged.translationEngine).toBe('external')
+    expect(merged.translationEngine).toBe('browser')
     expect(merged.pageTranslationEngine).toBe('browser')
     expect(merged.autoPageTranslation).toBe(false)
+    expect(merged.selectionTranslate).toBe(true)
+    expect(merged.onboardingCompleted).toBe(true)
     expect(merged.pageTranslationHotkey).toEqual(DEFAULT_SETTINGS.pageTranslationHotkey)
     expect(merged.pageTranslationFontSizePx).toBe(14)
     expect(merged.model).toBe(DEFAULT_SETTINGS.model)
+  })
+
+  it('only marks brand-new installs as needing onboarding', () => {
+    expect(mergeSettings(undefined).onboardingCompleted).toBe(false)
+    expect(mergeSettings({}).onboardingCompleted).toBe(false)
+    expect(mergeSettings({ sourceLang: 'ja' }).onboardingCompleted).toBe(true)
   })
 
   it('preserves pausedHostnames when provided', () => {
@@ -61,8 +72,8 @@ describe('mergeSettings', () => {
   it('accepts only known translation engines from storage', () => {
     expect(mergeSettings({ translationEngine: 'browser' }).translationEngine).toBe('browser')
     expect(mergeSettings({ translationEngine: 'external' }).translationEngine).toBe('external')
-    expect(mergeSettings({ translationEngine: 'fallback' }).translationEngine).toBe('external')
-    expect(mergeSettings({ browserTranslatorFallback: true }).translationEngine).toBe('external')
+    expect(mergeSettings({ translationEngine: 'fallback' }).translationEngine).toBe('browser')
+    expect(mergeSettings({ browserTranslatorFallback: true }).translationEngine).toBe('browser')
     expect(mergeSettings({ pageTranslationEngine: 'external' }).pageTranslationEngine).toBe(
       'external',
     )

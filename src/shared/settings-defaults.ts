@@ -29,8 +29,17 @@ export type UserSettings = {
   translationEngine: TranslationEngine
   /** Engine used by the full-page bilingual DOM translation mode. */
   pageTranslationEngine: TranslationEngine
-  /** Automatically enable full-page bilingual mode when the page is identified as English. */
+  /** Automatically enable full-page bilingual mode when the page matches sourceLang. */
   autoPageTranslation: boolean
+  /**
+   * When enabled, selecting text on the page shows a temporary translation popup.
+   * Independent of the lens and full-page modes.
+   */
+  selectionTranslate: boolean
+  /** Show the edge-docked floating control bubble on normal pages. */
+  showFloatingBubble: boolean
+  /** First-run setup wizard completed (or explicitly skipped). */
+  onboardingCompleted: boolean
   pageTranslationFontFamily: TranslationFontFamily
   pageTranslationFontSizePx: number
   pageTranslationUseCustomColor: boolean
@@ -59,9 +68,13 @@ export const DEFAULT_SETTINGS: UserSettings = {
   targetLang: 'zh',
   /** Default off: only translate the block under the lens (fast first paint). */
   autoTranslate: false,
-  translationEngine: 'external',
+  /** Prefer zero-config Chrome Translator for new installs. */
+  translationEngine: 'browser',
   pageTranslationEngine: 'browser',
   autoPageTranslation: false,
+  selectionTranslate: true,
+  showFloatingBubble: true,
+  onboardingCompleted: false,
   pageTranslationFontFamily: 'system',
   pageTranslationFontSizePx: 14,
   pageTranslationUseCustomColor: false,
@@ -164,6 +177,21 @@ export function mergeSettings(partial: unknown): UserSettings {
       typeof p.autoPageTranslation === 'boolean'
         ? p.autoPageTranslation
         : DEFAULT_SETTINGS.autoPageTranslation,
+    selectionTranslate:
+      typeof p.selectionTranslate === 'boolean'
+        ? p.selectionTranslate
+        : DEFAULT_SETTINGS.selectionTranslate,
+    showFloatingBubble:
+      typeof p.showFloatingBubble === 'boolean'
+        ? p.showFloatingBubble
+        : DEFAULT_SETTINGS.showFloatingBubble,
+    // Missing flag on an existing saved blob = upgrade; only brand-new installs see the wizard.
+    onboardingCompleted:
+      typeof p.onboardingCompleted === 'boolean'
+        ? p.onboardingCompleted
+        : Object.keys(p).length > 0
+          ? true
+          : DEFAULT_SETTINGS.onboardingCompleted,
     pageTranslationFontFamily: asTranslationFontFamily(p.pageTranslationFontFamily),
     pageTranslationFontSizePx: finiteNumber(
       p.pageTranslationFontSizePx,

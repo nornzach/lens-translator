@@ -611,11 +611,196 @@ function extractCandidate(
   return { id: makeBlockId(tag, text, coarsePath(el)), el, tag, text }
 }
 
+// ---------------------------------------------------------------------------
+// Lens-only deep pointer resolution (independent of full-page extract policy)
+// ---------------------------------------------------------------------------
+
+/** Lens accepts single letters / short UI tokens; full-page stays conservative. */
+export const LENS_MIN_TEXT_LENGTH = 1
+/** Hard cap so a mis-hit on <main> does not dump the whole page into the lens. */
+export const LENS_MAX_TEXT_LENGTH = 4000
+
 /**
- * Resolve only the hit element and its ancestors. Pointer tracking must never
- * trigger the full-document candidate scan used by auto-translate.
+ * Lens must not inherit page-mode skips (nav, pre, tooltips, toolbars, …).
+ * Only hard noise and extension chrome are excluded.
+ */
+const LENS_SKIP_SELF = new Set([
+  'script',
+  'style',
+  'noscript',
+  'template',
+  'canvas',
+  'video',
+  'audio',
+  'iframe',
+  'object',
+  'embed',
+  'textarea',
+  'input',
+  'select',
+  'option',
+  'br',
+  'hr',
+  'img',
+  'path',
+  'meta',
+  'link',
+  'head',
+  'html',
+  'body',
+  'svg',
+])
+
+const LENS_SKIP_CLOSEST =
+  'script, style, noscript, template, canvas, video, audio, iframe, object, embed, textarea, input, select, [data-lens-ignore], #lens-translator-root, #lens-translator-bubble-root, #lens-translator-selection-root, #lens-translator-setup-prompt'
+
+function shouldSkipForLens(el: Element): boolean {
+  if (el.closest(LENS_SKIP_CLOSEST)) return true
+  if (el.hasAttribute('hidden')) return true
+  if (el.getAttribute('aria-hidden') === 'true') return true
+  const tag = el.tagName.toLowerCase()
+  if (LENS_SKIP_SELF.has(tag)) return true
+  // Pure decoration without letters (icon fonts sometimes leave empty spans)
+  return false
+}
+
+/** Giant multi-block shells are never a single lens reading unit. */
+function isOversizedLensShell(el: Element, text: string): boolean {
+  if (text.length < 280) return false
+  const blocks = el.querySelectorAll(
+    'p, li, h1, h2, h3, h4, h5, h6, tr, blockquote, pre, section, article',
+  ).length
+  return blocks >= 4
+}
+
+function lensMinFor(el: Element, minTextLength: number): number {
+  if (isUiLabelElement(el)) return 1
+  return Math.max(1, Math.min(minTextLength, LENS_MIN_TEXT_LENGTH + 1))
+}
+
+/**
+ * Walk from the deepest hit upward and pick the **tightest** translatable unit.
+ * Does not use extractCandidate / page leaf heuristics / page skip lists.
+ */
+export function extractLensBlockAtElement(
+  hit: Element | null,
+  minTextLength: number = LENS_MIN_TEXT_LENGTH,
+): ExtractedBlock | undefined {
+  let current: Element | null = hit
+  while (current !== null) {
+    const el: Element = current
+    const tag = el.tagName.toLowerCase()
+    if (tag === 'html' || tag === 'body') break
+
+    let rendered = true
+    if (!shouldSkipForLens(el)) {
+      try {
+        rendered = isRendered(el)
+      } catch {
+        // Test stubs may lack getComputedStyle.
+        rendered = true
+      }
+      if (rendered) {
+        const text = sourceTextOf(el)
+        const min = lensMinFor(el, minTextLength)
+        if (
+          isTranslatableText(text, min) &&
+          text.length <= LENS_MAX_TEXT_LENGTH &&
+          !isOversizedLensShell(el, text)
+        ) {
+          return {
+            id: makeBlockId(tag, text, coarsePath(el)),
+            el,
+            tag,
+            text,
+          }
+        }
+      }
+    }
+    current = el.parentElement
+  }
+  return undefined
+}
+
+/**
+ * Deep pointer target for the lens: prefer the text node under the caret, then
+ * the element stack. Full-page scanners must not call this.
+ */
+export function extractLensTargetAt(
+  clientX: number,
+  clientY: number,
+  minTextLength: number = LENS_MIN_TEXT_LENGTH,
+): ExtractedBlock | undefined {
+  let start: Element | null = null
+
+  try {
+    const doc = document as Document & {
+      caretRangeFromPoint?: (x: number, y: number) => Range | null
+      caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node } | null
+    }
+    if (typeof doc.caretRangeFromPoint === 'function') {
+      const range = doc.caretRangeFromPoint(clientX, clientY)
+      const node = range?.startContainer
+      if (node) {
+        start =
+          node.nodeType === Node.TEXT_NODE
+            ? node.parentElement
+            : node instanceof Element
+              ? node
+              : null
+      }
+    } else if (typeof doc.caretPositionFromPoint === 'function') {
+      const pos = doc.caretPositionFromPoint(clientX, clientY)
+      const node = pos?.offsetNode
+      if (node) {
+        start =
+          node.nodeType === Node.TEXT_NODE
+            ? node.parentElement
+            : node instanceof Element
+              ? node
+              : null
+      }
+    }
+  } catch {
+    // Some origins / embedders block caret APIs.
+  }
+
+  if (!start) {
+    try {
+      const stack = document.elementsFromPoint(clientX, clientY)
+      start =
+        stack.find(
+          (el) =>
+            el.id !== 'lens-translator-root' &&
+            !el.closest?.(
+              '#lens-translator-root, #lens-translator-bubble-root, #lens-translator-selection-root',
+            ) &&
+            !shouldSkipForLens(el),
+        ) ?? null
+    } catch {
+      start = null
+    }
+  }
+
+  const fromDeep = extractLensBlockAtElement(start, minTextLength)
+  if (fromDeep) return fromDeep
+
+  // Fallback: page-style candidate walk (still pointer-local, no full scan).
+  return extractBlockAtElementPagePolicy(start, minTextLength)
+}
+
+/**
+ * Page-oriented pointer resolution (shared extractCandidate + skip lists).
+ * Prefer extractLensTargetAt for the translation lens.
  */
 export function extractBlockAtElement(
+  hit: Element | null,
+  minTextLength: number,
+): ExtractedBlock | undefined {
+  return extractBlockAtElementPagePolicy(hit, minTextLength)
+}
+
+function extractBlockAtElementPagePolicy(
   hit: Element | null,
   minTextLength: number,
 ): ExtractedBlock | undefined {

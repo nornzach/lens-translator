@@ -53,6 +53,8 @@ export type ContentSettings = Pick<
   | 'translationEngine'
   | 'pageTranslationEngine'
   | 'autoPageTranslation'
+  | 'selectionTranslate'
+  | 'showFloatingBubble'
   | 'pageTranslationFontFamily'
   | 'pageTranslationFontSizePx'
   | 'pageTranslationUseCustomColor'
@@ -86,7 +88,7 @@ export type PauseHostnameMsg = {
   paused: boolean
 }
 
-export type OpenOptionsMsg = { type: 'open-options' }
+export type OpenOptionsMsg = { type: 'open-options'; hash?: string }
 
 /**
  * Options-page-only reachability probe. Carries the credentials currently typed
@@ -111,10 +113,28 @@ export type TogglePageTranslationResult =
   | { ok: true }
   | { ok: false; error: string }
 
+export type ToggleLensMsg = { type: 'toggle-lens' }
+export type ToggleLensResult =
+  | { ok: true; lensActive: boolean }
+  | { ok: false; error: string }
+
 export type BubbleControlMsg = {
   type: 'bubble-control'
   command: 'get-state' | 'toggle-page-translation' | 'toggle-lens'
 }
+
+export type TestVisionMsg = {
+  type: 'test-vision'
+  baseURL: string
+  apiKey: string
+  model: string
+  provider: UserSettings['provider']
+  reasoningPref: UserSettings['reasoningPref']
+}
+
+export type TestVisionResult =
+  | { type: 'test-vision-result'; ok: true }
+  | { type: 'test-vision-result'; ok: false; error: string }
 
 export type BubbleControlResult =
   | {
@@ -138,6 +158,7 @@ export type ToBackground =
   | PauseHostnameMsg
   | OpenOptionsMsg
   | TestConnectionMsg
+  | TestVisionMsg
 export type FromBackground =
   | TranslateBatchResultOk
   | TranslateBatchResultErr
@@ -145,5 +166,6 @@ export type FromBackground =
   | TranslateImageResultErr
   | SettingsMsg
   | TestConnectionResult
+  | TestVisionResult
   | BackgroundErrorResult
   | { type: 'open-options-result'; ok: boolean }

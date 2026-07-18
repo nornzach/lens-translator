@@ -1,7 +1,7 @@
 {
-  "name": "feat-lens-translator",
-  "version": "0.3.0",
-  "description": "Hold a hotkey to peek Chinese translations without leaving English immersion.",
+  "name": "lens-translator",
+  "version": "0.4.0",
+  "description": "On-demand translation lens, selection popup, and bilingual page mode for Chrome.",
   "private": true,
   "type": "module",
   "scripts": {

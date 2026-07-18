@@ -52,6 +52,8 @@ export class LensOverlay {
   private highlightEl: Element | null = null
   private widthPx: number
   private lastSourceKey = ''
+  private sourceLangLabel = '源语言'
+  private targetLangLabel = '译文'
 
   constructor(widthPx = 340) {
     this.widthPx = widthPx
@@ -104,18 +106,18 @@ export class LensOverlay {
     this.textLayer.className = 'liquidGlass-text'
 
     this.sourceLabel = document.createElement('div')
-    this.sourceLabel.className = 'label label-en'
-    this.sourceLabel.textContent = 'EN'
+    this.sourceLabel.className = 'label label-source'
+    this.sourceLabel.textContent = this.sourceLangLabel
 
     this.sourceBody = document.createElement('div')
-    this.sourceBody.className = 'body body-en'
+    this.sourceBody.className = 'body body-source'
 
     this.divider = document.createElement('div')
     this.divider.className = 'divider'
 
     this.zhLabel = document.createElement('div')
-    this.zhLabel.className = 'label label-zh'
-    this.zhLabel.textContent = '中文'
+    this.zhLabel.className = 'label label-target'
+    this.zhLabel.textContent = this.targetLangLabel
 
     this.body = document.createElement('div')
     this.body.className = 'body body-zh'
@@ -151,6 +153,14 @@ export class LensOverlay {
     this.applyWidth()
   }
 
+  /** Update source/target badges for the active language pair. */
+  setLanguageLabels(sourceLabel: string, targetLabel: string): void {
+    this.sourceLangLabel = sourceLabel || '源语言'
+    this.targetLangLabel = targetLabel || '译文'
+    this.sourceLabel.textContent = this.sourceLangLabel
+    this.zhLabel.textContent = this.targetLangLabel
+  }
+
   /**
    * Scale the lens body text off the shared page-translation font-size setting so
    * the lens and full-page modes stay visually consistent. The offsets reproduce
@@ -173,9 +183,12 @@ export class LensOverlay {
   }
 
   setAppearance(settings: LensAppearance): void {
+    const prefersDark =
+      typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches
+    const defaultTarget = prefersDark ? 'rgba(242, 244, 247, 0.96)' : 'rgba(20, 24, 32, 0.94)'
     this.host.style.setProperty(
       '--lens-target-color',
-      settings.pageTranslationUseCustomColor ? settings.pageTranslationTextColor : 'rgba(0, 0, 0, 0.92)',
+      settings.pageTranslationUseCustomColor ? settings.pageTranslationTextColor : defaultTarget,
     )
     this.host.style.setProperty(
       '--lens-target-background',
@@ -222,11 +235,11 @@ export class LensOverlay {
 
     switch (state.kind) {
       case 'ready':
-        this.zhLabel.textContent = '中文'
+        this.zhLabel.textContent = this.targetLangLabel
         this.body.textContent = state.text
         break
       case 'pending':
-        this.zhLabel.textContent = '中文'
+        this.zhLabel.textContent = this.targetLangLabel
         this.body.classList.add('muted', 'pending-anim')
         this.body.textContent = '翻译中…'
         break
@@ -247,7 +260,7 @@ export class LensOverlay {
         this.body.textContent = '此段已是目标语言'
         break
       case 'error':
-        this.zhLabel.textContent = '中文'
+        this.zhLabel.textContent = this.targetLangLabel
         this.body.classList.add('muted')
         this.body.textContent = state.message
         break
@@ -257,11 +270,11 @@ export class LensOverlay {
         this.divider.hidden = true
         this.zhLabel.hidden = true
         this.body.classList.add('muted')
-        this.body.textContent = '请先在扩展「选项」中配置 API'
+        this.body.textContent = '翻译引擎未就绪，请下载语言包或配置外部 LLM'
         break
     }
 
-    this.hint.textContent = '可直接选择文本复制'
+    this.hint.textContent = '可选择文本复制 · Esc 关闭'
 
     const sourceRect =
       'sourceRect' in state && state.sourceRect ? state.sourceRect : null
@@ -437,24 +450,24 @@ const LENS_STYLES = `
     position: fixed;
     display: flex;
     overflow: hidden;
-    padding: 0.9rem 1.1rem;
-    border-radius: 1.35rem;
+    padding: 0.85rem 1rem;
+    border-radius: 14px;
     box-shadow:
-      0 8px 28px rgba(0, 0, 0, 0.14),
-      0 2px 8px rgba(0, 0, 0, 0.08),
-      0 0 0 0.5px rgba(255, 255, 255, 0.8);
-    transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-    font: 16px/1.55 var(--lens-font-family, -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif);
+      0 10px 32px rgba(15, 23, 42, 0.14),
+      0 2px 8px rgba(15, 23, 42, 0.06),
+      0 0 0 1px rgba(15, 23, 42, 0.06);
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+    font: 16px/1.55 var(--lens-font-family, Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, system-ui, sans-serif);
     -webkit-font-smoothing: antialiased;
-    color: rgba(0, 0, 0, 0.92);
+    color: rgba(20, 24, 32, 0.94);
   }
 
   .liquidGlass-wrapper.is-visible {
-    animation: glassIn 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275) both;
+    animation: glassIn 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both;
   }
 
   @keyframes glassIn {
-    from { opacity: 0; transform: scale(0.94) translateY(6px); }
+    from { opacity: 0; transform: scale(0.96) translateY(4px); }
     to { opacity: 1; transform: scale(1) translateY(0); }
   }
 
@@ -463,9 +476,8 @@ const LENS_STYLES = `
     z-index: 0;
     inset: 0;
     border-radius: inherit;
-    backdrop-filter: blur(18px) saturate(140%);
-    -webkit-backdrop-filter: blur(18px) saturate(140%);
-    filter: url(#glass-distortion);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
     isolation: isolate;
   }
 
@@ -474,14 +486,7 @@ const LENS_STYLES = `
     z-index: 1;
     inset: 0;
     border-radius: inherit;
-    background: rgba(255, 255, 255, 0.9);
-    background-image:
-      linear-gradient(
-        145deg,
-        rgba(255, 255, 255, 0.97) 0%,
-        rgba(255, 255, 255, 0.92) 48%,
-        rgba(245, 248, 255, 0.9) 100%
-      );
+    background: rgba(255, 255, 255, 0.94);
   }
 
   .liquidGlass-shine {
@@ -489,10 +494,7 @@ const LENS_STYLES = `
     z-index: 2;
     inset: 0;
     border-radius: inherit;
-    box-shadow:
-      inset 2px 2px 1px 0 rgba(255, 255, 255, 0.75),
-      inset -1px -1px 1px 1px rgba(255, 255, 255, 0.45),
-      inset 0 0 0 0.5px rgba(255, 255, 255, 0.65);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7);
     pointer-events: none;
   }
 
@@ -506,9 +508,7 @@ const LENS_STYLES = `
   .panel {
     flex-direction: column;
     max-height: min(440px, 58vh);
-    background: rgba(255, 255, 255, 0.62);
-  }
-  .panel {
+    background: transparent;
     pointer-events: auto;
     user-select: text;
   }
@@ -524,26 +524,22 @@ const LENS_STYLES = `
   }
 
   .label {
-    font-size: 11px;
+    font-size: 10.5px;
     font-weight: 700;
-    letter-spacing: 0.06em;
-    color: rgba(0, 0, 0, 0.4);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: rgba(91, 100, 114, 0.95);
     margin-bottom: 4px;
   }
 
-  .label-zh {
+  .label-target {
     margin-top: 2px;
   }
 
   .divider {
     height: 1px;
     margin: 10px 0;
-    background: linear-gradient(
-      90deg,
-      rgba(0, 0, 0, 0.06),
-      rgba(0, 0, 0, 0.12),
-      rgba(0, 0, 0, 0.06)
-    );
+    background: rgba(15, 23, 42, 0.08);
   }
 
   .body {
@@ -551,20 +547,21 @@ const LENS_STYLES = `
     word-break: break-word;
     font-size: var(--lens-zh-size, 16.5px);
     line-height: 1.55;
-    color: rgba(0, 0, 0, 0.92);
+    color: rgba(20, 24, 32, 0.94);
     font-weight: 520;
   }
 
-  .body-en {
+  .body-source {
     font-size: var(--lens-en-size, 14.5px);
     line-height: 1.5;
-    color: rgba(0, 0, 0, 0.55);
+    color: rgba(91, 100, 114, 0.95);
     font-weight: 450;
   }
 
-  .body-zh {
+  .body-zh,
+  .body-target {
     font-size: var(--lens-zh-size, 16.5px);
-    color: var(--lens-target-color, rgba(0, 0, 0, 0.92));
+    color: var(--lens-target-color, rgba(20, 24, 32, 0.94));
     background: var(--lens-target-background, transparent);
     padding: var(--lens-target-padding, 0);
     border-radius: var(--lens-target-radius, 0);
@@ -574,24 +571,23 @@ const LENS_STYLES = `
   }
 
   .body.muted {
-    color: rgba(0, 0, 0, 0.52);
+    color: rgba(91, 100, 114, 0.95);
     font-weight: 400;
   }
 
   .hint {
     margin-top: 10px;
     font-size: 11.5px;
-    color: rgba(0, 0, 0, 0.38);
+    color: rgba(139, 147, 160, 0.98);
     line-height: 1.4;
   }
 
-  /* Outline only — no frost/blur over the original English */
   .source-outline {
     position: fixed;
     pointer-events: none;
     border-radius: 6px;
-    border: 1.5px solid rgba(0, 122, 255, 0.55);
-    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.5);
+    border: 1.5px solid rgba(23, 105, 224, 0.55);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
     background: transparent;
   }
 
@@ -602,5 +598,39 @@ const LENS_STYLES = `
 
   .pending-anim {
     animation: lens-pulse 1.1s ease-in-out infinite;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .liquidGlass-wrapper {
+      color: rgba(242, 244, 247, 0.96);
+      box-shadow:
+        0 12px 36px rgba(0, 0, 0, 0.45),
+        0 0 0 1px rgba(255, 255, 255, 0.08);
+    }
+    .liquidGlass-tint {
+      background: rgba(24, 27, 33, 0.94);
+    }
+    .liquidGlass-shine {
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+    }
+    .label { color: rgba(168, 176, 189, 0.95); }
+    .divider { background: rgba(255, 255, 255, 0.08); }
+    .body { color: rgba(242, 244, 247, 0.96); }
+    .body-source { color: rgba(168, 176, 189, 0.95); }
+    .body-zh,
+    .body-target {
+      color: var(--lens-target-color, rgba(242, 244, 247, 0.96));
+    }
+    .body.muted { color: rgba(168, 176, 189, 0.9); }
+    .hint { color: rgba(123, 132, 148, 0.98); }
+    .source-outline {
+      border-color: rgba(77, 142, 240, 0.7);
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .liquidGlass-wrapper.is-visible { animation: none; }
+    .pending-anim { animation: none; }
   }
 `
