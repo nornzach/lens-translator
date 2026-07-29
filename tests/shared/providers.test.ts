@@ -15,6 +15,13 @@ describe('detectProvider', () => {
     expect(detectProvider('https://api.stepfun.ai/v1', 'foo')).toBe('stepfun')
     expect(detectProvider('https://other.example/v1', 'step-3.7-flash')).toBe('stepfun')
   })
+
+  it('detects alibaba from dashscope host or qwen model', () => {
+    expect(detectProvider('https://dashscope.aliyuncs.com/compatible-mode/v1', 'qwen-plus')).toBe(
+      'alibaba',
+    )
+    expect(detectProvider('https://other.example/v1', 'qwen3.7-flash')).toBe('alibaba')
+  })
 })
 
 describe('applyProviderRequestBody', () => {
@@ -36,6 +43,19 @@ describe('applyProviderRequestBody', () => {
     expect(body.reasoning_effort).toBe('high')
   })
 
+  it('disables alibaba thinking when off, enables it otherwise', () => {
+    const off: Record<string, unknown> = { model: 'qwen-plus' }
+    applyProviderRequestBody(off, 'alibaba', 'off')
+    expect(off.enable_thinking).toBe(false)
+
+    const on: Record<string, unknown> = { model: 'qwen-plus' }
+    applyProviderRequestBody(on, 'alibaba', 'low')
+    expect(on.enable_thinking).toBe(true)
+    // Budget/effort stay at model defaults — no invented per-model mappings.
+    expect(on.thinking_budget).toBeUndefined()
+    expect(on.reasoning_effort).toBeUndefined()
+  })
+
   it('leaves openai body alone', () => {
     const body: Record<string, unknown> = { model: 'gpt-4o-mini' }
     applyProviderRequestBody(body, 'openai', 'off')
@@ -47,5 +67,6 @@ describe('applyProviderRequestBody', () => {
 describe('resolveProvider', () => {
   it('respects explicit preference', () => {
     expect(resolveProvider('deepseek', 'https://api.openai.com/v1', 'gpt')).toBe('deepseek')
+    expect(resolveProvider('alibaba', 'https://api.openai.com/v1', 'gpt')).toBe('alibaba')
   })
 })

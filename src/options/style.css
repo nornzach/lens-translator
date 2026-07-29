@@ -566,6 +566,16 @@ input[type='color'] {
   gap: 10px;
 }
 
+.model-field {
+  display: flex;
+  gap: 6px;
+}
+
+.model-field input {
+  flex: 1;
+  min-width: 0;
+}
+
 .capability-panel {
   display: grid;
   grid-template-columns: 12px 1fr auto;
@@ -1007,4 +1017,110 @@ input[type='color'] {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+/* Site rules + vocabulary */
+.site-rules-control,
+.vocab-control {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.site-rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.site-rules-list:empty {
+  display: none;
+}
+
+.site-rule-item {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.site-rule-item .host {
+  font-weight: 620;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-rule-item select {
+  font-size: 12px;
+}
+
+.site-rules-add {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.vocab-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 380px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.vocab-list:empty {
+  display: none;
+}
+
+.vocab-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+}
+
+.vocab-item:first-child {
+  border-top: 0;
+}
+
+.vocab-item .source {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.vocab-item .translation {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.vocab-item .meta {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.vocab-item .meta a {
+  color: inherit;
+}
+
+.vocab-item button {
+  align-self: start;
+}
+
+.vocab-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
 }

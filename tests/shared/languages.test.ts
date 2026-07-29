@@ -3,6 +3,8 @@ import {
   languageName,
   languagePairLabel,
   languageShortLabel,
+  toTranslatorLanguageTag,
+  translatorLanguageTagCandidates,
 } from '../../src/shared/languages'
 
 describe('languages', () => {
@@ -18,5 +20,19 @@ describe('languages', () => {
   it('falls back for unknown codes', () => {
     expect(languageName('xx-YY')).toBe('xx-YY')
     expect(languageShortLabel('xx')).toBe('XX')
+  })
+
+  it('prefers bare zh first, then script/region forms for Chrome Translator', () => {
+    expect(toTranslatorLanguageTag('en')).toBe('en')
+    expect(toTranslatorLanguageTag('zh')).toBe('zh')
+    expect(translatorLanguageTagCandidates('zh')).toEqual(['zh', 'zh-Hans', 'zh-CN'])
+    expect(translatorLanguageTagCandidates('zh-Hans')).toEqual(['zh', 'zh-Hans', 'zh-CN'])
+    expect(translatorLanguageTagCandidates('zh-Hant')).toEqual([
+      'zh-Hant',
+      'zh-TW',
+      'zh-HK',
+      'zh',
+    ])
+    expect(translatorLanguageTagCandidates('ja')).toEqual(['ja'])
   })
 })

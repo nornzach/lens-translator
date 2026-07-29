@@ -28,6 +28,8 @@ type AlignmentEntry = {
   segments: DisplaySegment[]
   wordCount: number
   alignments: Map<number, Promise<SourceSpan | null>>
+  /** Per-character DOM index, built lazily once — rebuilding per hovered word janks. */
+  textIndex: NormalizedTextIndex | null
 }
 
 type TextPoint = { node: Text; offset: number }
@@ -229,11 +231,16 @@ function normalizedTextIndex(host: Element): NormalizedTextIndex {
   return { text, starts, ends }
 }
 
-function domRangeForSourceSpan(host: Element, sourceText: string, span: SourceSpan): Range | null {
-  const index = normalizedTextIndex(host)
-  if (index.text !== normalizeText(sourceText) || span.start < 0 || span.end > index.text.length) {
-    return null
+function domRangeForSourceSpan(entry: AlignmentEntry, span: SourceSpan): Range | null {
+  const { host, sourceText } = entry
+  let index = entry.textIndex
+  if (!index || index.text !== normalizeText(sourceText)) {
+    // Host text drifted (or first use) — rebuild once; bail if still inconsistent.
+    index = normalizedTextIndex(host)
+    entry.textIndex = index
+    if (index.text !== normalizeText(sourceText)) return null
   }
+  if (span.start < 0 || span.end > index.text.length) return null
   const start = index.starts[span.start]
   const end = index.ends[span.end - 1]
   if (!start || !end) return null
@@ -248,6 +255,14 @@ function numericStyle(value: string): number {
   return Number.isFinite(number) ? number : 0
 }
 
+/** Payload offered to the vocabulary notebook when the user stars a hovered word. */
+export type AlignedWordStar = {
+  source: string
+  translation: string
+  sourceLang: string
+  targetLang: string
+}
+
 /** Handles target-word hit testing and source highlighting without mutating source text nodes. */
 export class PageAlignmentController {
   private entries = new WeakMap<Element, AlignmentEntry>()
@@ -256,9 +271,21 @@ export class PageAlignmentController {
   private overlayHost: Element | null = null
   private overlayWords = new Map<number, HTMLSpanElement>()
   private hovered: { host: Element; wordIndex: number } | null = null
+  private hoveredText = ''
   private highlightedHost: Element | null = null
+  private starBtn: HTMLButtonElement | null = null
+  private starContext: AlignedWordStar | null = null
+  /** Optional notebook hook — wired by the owning PageTranslator. */
+  onWordStar: ((payload: AlignedWordStar) => void) | null = null
   private alignmentTimer = 0
   private active = false
+  private pointerFrame = 0
+  private pendingPointer: PointerEvent | null = null
+  /** Per-host layout measurements, valid until the pointer leaves the host (or scroll/resize). */
+  private measuredHost: Element | null = null
+  private measuredTranslationTop = 0
+  private measuredHostTop = 0
+  private measuredPseudoStyle: CSSStyleDeclaration | null = null
 
   activate(): void {
     if (this.active) return
@@ -273,6 +300,9 @@ export class PageAlignmentController {
     document.removeEventListener('pointermove', this.onPointerMove, true)
     window.removeEventListener('scroll', this.onViewportChange, true)
     window.removeEventListener('resize', this.onViewportChange)
+    if (this.pointerFrame) window.cancelAnimationFrame(this.pointerFrame)
+    this.pointerFrame = 0
+    this.pendingPointer = null
     this.clearInteraction()
     this.entries = new WeakMap<Element, AlignmentEntry>()
   }
@@ -296,6 +326,7 @@ export class PageAlignmentController {
       segments,
       wordCount: segments.filter((segment) => segment.wordIndex !== null).length,
       alignments: new Map(),
+      textIndex: null,
     })
   }
 
@@ -306,7 +337,22 @@ export class PageAlignmentController {
 
   private readonly onViewportChange = () => this.clearInteraction()
 
+  /**
+   * pointermove fires per pixel; the work below needs Range rects and a
+   * pseudo-element computed style, so coalesce events into one rAF per frame.
+   */
   private readonly onPointerMove = (event: PointerEvent): void => {
+    this.pendingPointer = event
+    if (this.pointerFrame) return
+    this.pointerFrame = window.requestAnimationFrame(() => {
+      this.pointerFrame = 0
+      const latest = this.pendingPointer
+      this.pendingPointer = null
+      if (latest && this.active) this.handlePointerMove(latest)
+    })
+  }
+
+  private handlePointerMove(event: PointerEvent): void {
     const origin = event.composedPath().find((item): item is Element => item instanceof Element)
     const host = origin?.closest(TRANSLATED_SELECTOR) ?? null
     const entry = host ? this.entries.get(host) : undefined
@@ -315,9 +361,24 @@ export class PageAlignmentController {
       return
     }
 
-    const sourceBottom = this.sourceContentBottom(host)
-    const pseudoStyle = window.getComputedStyle(host, '::after')
-    const translationTop = sourceBottom + numericStyle(pseudoStyle.marginTop)
+    // Layout reads are cached per host — moving within one translated block no
+    // longer forces Range/computed-style work on every frame. A cheap rect-top
+    // check detects the host drifting (streamed translations above pushing it).
+    const rectTop = host.getBoundingClientRect().top
+    if (
+      host !== this.measuredHost ||
+      !this.measuredPseudoStyle ||
+      rectTop !== this.measuredHostTop
+    ) {
+      const pseudoStyle = window.getComputedStyle(host, '::after')
+      this.measuredHost = host
+      this.measuredPseudoStyle = pseudoStyle
+      this.measuredHostTop = rectTop
+      this.measuredTranslationTop =
+        this.sourceContentBottom(host) + numericStyle(pseudoStyle.marginTop)
+    }
+    const translationTop = this.measuredTranslationTop
+    const pseudoStyle = this.measuredPseudoStyle
     if (event.clientY < translationTop) {
       this.clearInteraction()
       return
@@ -341,11 +402,13 @@ export class PageAlignmentController {
       window.clearTimeout(this.alignmentTimer)
       this.clearHighlight()
       this.hovered = null
+      this.hoveredText = ''
       return
     }
     if (this.hovered?.host === host && this.hovered.wordIndex === segment.wordIndex) return
 
     this.hovered = { host, wordIndex: segment.wordIndex }
+    this.hoveredText = segment.text
     const fallback = findApproximateSourceSpan(
       entry.sourceText,
       '',
@@ -388,6 +451,27 @@ export class PageAlignmentController {
     })
   }
 
+  /** Reverse-pair readiness cache: hovering must never trigger a pack download. */
+  private readonly reverseReady = new Map<string, Promise<boolean>>()
+
+  /**
+   * Back-translation improves alignment, but creating the reverse session can
+   * download a whole language pack. Only translate when the pair is already
+   * available on device; otherwise the proportional fallback is good enough.
+   */
+  private reversePairReady(targetLanguage: string, sourceLanguage: string): Promise<boolean> {
+    const key = `${targetLanguage}\0${sourceLanguage}`
+    let ready = this.reverseReady.get(key)
+    if (!ready) {
+      ready = this.translator
+        .availability(targetLanguage, sourceLanguage)
+        .then((availability) => availability === 'available')
+        .catch(() => false)
+      this.reverseReady.set(key, ready)
+    }
+    return ready
+  }
+
   private alignSegment(entry: AlignmentEntry, segment: DisplaySegment): Promise<SourceSpan | null> {
     const fallback = findApproximateSourceSpan(
       entry.sourceText,
@@ -397,17 +481,23 @@ export class PageAlignmentController {
       entry.sourceLanguage,
     )
     if (!this.translator.isSupported()) return Promise.resolve(fallback)
-    return this.translator
-      .translate(segment.text, entry.targetLanguage, entry.sourceLanguage)
-      .then((backTranslation) =>
-        findApproximateSourceSpan(
+    return this.reversePairReady(entry.targetLanguage, entry.sourceLanguage).then(
+      async (ready) => {
+        if (!ready) return fallback
+        const backTranslation = await this.translator.translate(
+          segment.text,
+          entry.targetLanguage,
+          entry.sourceLanguage,
+        )
+        return findApproximateSourceSpan(
           entry.sourceText,
           backTranslation ?? '',
           segment.wordIndex ?? 0,
           entry.wordCount,
           entry.sourceLanguage,
-        ),
-      )
+        )
+      },
+    )
   }
 
   private ensureOverlay(
@@ -498,7 +588,7 @@ export class PageAlignmentController {
   }
 
   private highlight(entry: AlignmentEntry, span: SourceSpan): void {
-    const range = domRangeForSourceSpan(entry.host, entry.sourceText, span)
+    const range = domRangeForSourceSpan(entry, span)
     if (!range) return
     this.clearHighlight()
     const registry = (globalThis.CSS as typeof CSS & { highlights?: HighlightRegistryLike })
@@ -510,6 +600,58 @@ export class PageAlignmentController {
       entry.host.setAttribute(PAGE_ALIGNMENT_FALLBACK_ATTR, '')
     }
     this.highlightedHost = entry.host
+    this.showWordStar(entry, span, range)
+  }
+
+  /** Tiny ☆ button docked above the highlighted source span (vocabulary save). */
+  private showWordStar(entry: AlignmentEntry, span: SourceSpan, range: Range): void {
+    if (!this.onWordStar) return
+    const source = entry.sourceText.slice(span.start, span.end).trim()
+    const translation = this.hoveredText.trim()
+    if (!source || !translation) return
+    this.starContext = {
+      source,
+      translation,
+      sourceLang: entry.sourceLanguage,
+      targetLang: entry.targetLanguage,
+    }
+
+    if (!this.starBtn) {
+      this.starBtn = document.createElement('button')
+      this.starBtn.type = 'button'
+      this.starBtn.id = 'lens-translator-alignment-star'
+      this.starBtn.setAttribute('data-lens-ignore', '')
+      this.starBtn.title = '收藏到生词本'
+      Object.assign(this.starBtn.style, {
+        all: 'initial',
+        position: 'fixed',
+        zIndex: '2147483647',
+        padding: '2px 6px',
+        border: '1px solid rgb(15 23 42 / 18%)',
+        borderRadius: '6px',
+        background: 'rgb(255 255 255 / 97%)',
+        boxShadow: '0 4px 12px rgb(15 23 42 / 18%)',
+        color: '#b45309',
+        font: '13px/1.2 system-ui, sans-serif',
+        cursor: 'pointer',
+      })
+      this.starBtn.addEventListener('click', (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        if (this.starBtn && this.starContext) {
+          this.onWordStar?.(this.starContext)
+          this.starBtn.textContent = '★'
+        }
+      })
+    }
+    this.starBtn.textContent = '☆'
+    if (!this.starBtn.isConnected) document.documentElement.append(this.starBtn)
+
+    const rect = range.getBoundingClientRect()
+    const left = Math.min(Math.max(4, rect.left), window.innerWidth - 34)
+    const top = rect.top > 34 ? rect.top - 28 : rect.bottom + 6
+    this.starBtn.style.left = `${left}px`
+    this.starBtn.style.top = `${Math.max(4, top)}px`
   }
 
   private clearHighlight(): void {
@@ -524,6 +666,12 @@ export class PageAlignmentController {
     window.clearTimeout(this.alignmentTimer)
     this.clearHighlight()
     this.hovered = null
+    this.hoveredText = ''
+    this.starBtn?.remove()
+    this.starContext = null
+    this.measuredHost = null
+    this.measuredPseudoStyle = null
+    this.measuredTranslationTop = 0
     this.overlay?.remove()
     this.overlay = null
     this.overlayHost = null

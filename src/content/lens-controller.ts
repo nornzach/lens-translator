@@ -11,16 +11,20 @@ import type {
   TranslateBatchResultErr,
   TranslateBatchResultOk,
   TranslateBlock,
+  TranslateDictResult,
   TranslateImageResultErr,
   TranslateImageResultOk,
   TogglePageTranslationResult,
 } from '../shared/messages'
 import { isPredominantlyTargetLanguage, normalizeText } from '../shared/text'
+import { runWithConcurrency } from '../shared/concurrency'
 import {
   coarsePath,
+  extractEditableTarget,
   extractLensTargetAt,
   extractVisibleBlocks,
   LENS_MIN_TEXT_LENGTH,
+  type EditableTarget,
 } from './extract'
 import { BlockRegistry } from './registry'
 import { LensOverlay } from './lens'
@@ -29,11 +33,25 @@ import { ImageRegistry, type ImageTranslationEntry } from './image-registry'
 import { makePageKey } from './page-key'
 import { TranslationBatcher } from './translation-batcher'
 import { PageTranslator } from './page-translator'
-import { evaluatePageLanguageMatch } from './page-language'
+import {
+  evaluatePageLanguageMatch,
+  isInsufficientLanguageSample,
+  primaryLanguage,
+} from './page-language'
+import {
+  detectLanguageByScript,
+  resolveSourceLanguage,
+} from '../shared/language-detect'
+import { addVocabularyEntry, vocabularyKey } from '../shared/vocabulary'
+import type { DictionaryEntry } from '../shared/schema'
 import { SelectionTranslator } from './selection-translator'
 import { SetupPrompt } from './setup-prompt'
 
 const TAP_STICKY_MS = 320
+
+// Per-line external requests in flight at once for lens/prefetch translation.
+// Each hovered block is its own API call — one slow batch must not stall the rest.
+const LENS_TRANSLATION_CONCURRENCY = 6
 
 // ---------------------------------------------------------------------------
 // Runtime type guards (no runtime dep, zero alloc on hot path)
@@ -126,6 +144,7 @@ export function pageTranslationSigOf(s: UserSettings, isConfiguredFlag: boolean)
  */
 function pageStyleSigOf(s: UserSettings): string {
   return [
+    s.pageTranslationDisplayMode,
     s.pageTranslationFontFamily,
     s.pageTranslationFontSizePx,
     s.pageTranslationUseCustomColor,
@@ -189,8 +208,6 @@ export class LensController {
   /** True while the lens hotkey combo is physically held (survives async readiness checks). */
   private hotkeyHeld = false
   private lastMouse = { x: 0, y: 0 }
-  /** Throttle full-screen setup prompt when selection translation hits a cold engine. */
-  private lastSelectionSetupPromptAt = 0
 
   // --- in-flight dedup ---
   /** In-flight block ids — avoid duplicate API calls for the same block. */
@@ -198,6 +215,28 @@ export class LensController {
   /** In-flight normalized texts — identical sentences share one request. */
   private readonly inflightTexts = new Map<string, number>()
   private readonly imageInflight = new Set<string>()
+
+  // --- feature state: input translate / dict / tts / vocabulary / auto-source ---
+  private readonly editableCache = new Map<
+    string,
+    { translation: string; sourceLang: string; targetLang: string }
+  >()
+  private readonly editableInflight = new Set<string>()
+  private readonly dictCache = new Map<string, DictionaryEntry>()
+  private readonly dictInflight = new Set<string>()
+  /** Starred items this session (for the ★ marker; storage dedupes regardless). */
+  private readonly starredKeys = new Set<string>()
+  /** Content backing the current panel buttons; null when nothing actionable. */
+  private lensPayload: {
+    sourceText: string
+    translation: string | null
+    sourceLang: string
+    targetLang: string
+    editable?: EditableTarget
+  } | null = null
+  /** Resolved 'auto' source language for this page session. */
+  private resolvedSourceLang: string | null = null
+  private resolvingSourceLang: Promise<string> | null = null
 
   // --- rAF + bind guard ---
   private pointerFrame = 0
@@ -209,7 +248,38 @@ export class LensController {
   constructor(lensWidthPx = 340) {
     this.lens = new LensOverlay(lensWidthPx)
     this.batcher = new TranslationBatcher((blocks) => this.translateSpecific(blocks))
-    this.selectionTranslator = new SelectionTranslator((text) => this.translateSelectionText(text))
+    this.selectionTranslator = new SelectionTranslator(
+      (text) => this.translateSelectionText(text),
+      {
+        onSpeak: (text) => this.speak(text, this.settings.targetLang),
+        onStar: (source, translation) => {
+          void this.saveToVocabulary(source, translation)
+        },
+      },
+    )
+    this.lens.onSpeak((which) => {
+      const payload = this.lensPayload
+      if (!payload) return
+      const text = which === 'source' ? payload.sourceText : payload.translation
+      if (text) this.speak(text, which === 'source' ? payload.sourceLang : payload.targetLang)
+    })
+    this.lens.onStar(() => {
+      const payload = this.lensPayload
+      if (!payload?.translation) return
+      void this.saveToVocabulary(payload.sourceText, payload.translation, payload)
+    })
+    this.lens.onAction(() => {
+      const payload = this.lensPayload
+      if (!payload?.editable || !payload.translation) return
+      this.replaceEditableContent(payload.editable, payload.translation)
+    })
+    // Word-level star from full-page alignment hover → vocabulary notebook.
+    this.pageTranslator.setWordStarHandler((payload) => {
+      void this.saveToVocabulary(payload.source, payload.translation, {
+        sourceLang: payload.sourceLang,
+        targetLang: payload.targetLang,
+      })
+    })
   }
 
   /** Optional host for the edge bubble so settings can hide it without remounting. */
@@ -298,12 +368,12 @@ export class LensController {
       this.lens.setFontFamily(this.settings.pageTranslationFontFamily)
       this.lens.setAppearance(this.settings)
       this.lens.setLanguageLabels(
-        languageShortLabel(this.settings.sourceLang),
+        languageShortLabel(this.syncSourceLang()),
         languageShortLabel(this.settings.targetLang),
       )
       this.selectionTranslator.setPaused(this.pausedHere)
       this.selectionTranslator.setEnabled(this.settings.selectionTranslate)
-      this.selectionTranslator.setLanguages(this.settings.sourceLang, this.settings.targetLang)
+      this.selectionTranslator.setLanguages(this.syncSourceLang(), this.settings.targetLang)
       this.onBubbleVisibility?.(this.settings.showFloatingBubble && !this.pausedHere)
       this.syncAutoScanObserver()
 
@@ -316,6 +386,16 @@ export class LensController {
       const pageChanged = pageSig !== this.pageSettingsSig
       const previousPageSig = this.pageSettingsSig
       this.pageSettingsSig = pageSig
+
+      // Language pair or engine changed — re-resolve 'auto' source and drop all
+      // pair-keyed caches (input back-translations, dictionary cards).
+      if (lensChanged || pageChanged) {
+        this.resolvedSourceLang = null
+        this.editableCache.clear()
+        this.dictCache.clear()
+        this.dictErrors.clear()
+        this.lensPayload = null
+      }
 
       const styleSig = pageStyleSigOf(this.settings)
       const styleChanged = styleSig !== this.pageStyleSig
@@ -384,7 +464,8 @@ export class LensController {
     if (this.lensActive) this.deactivateLens()
     // Manual open: suppress further auto-start noise for this page session.
     this.suppressAutoPage('user-open')
-    await this.pageTranslator.toggle(this.settings, this.configured)
+    const settings = { ...this.settings, sourceLang: await this.effectiveSourceLang() }
+    await this.pageTranslator.toggle(settings, this.configured)
     return { ok: true }
   }
 
@@ -406,10 +487,8 @@ export class LensController {
     this.lensSticky = true
     this.hotkeyHeld = false
     this.ensureMouseSeed()
-    if (this.settings.translationEngine === 'browser') {
-      void this.browserTranslator.prepare(this.settings.sourceLang, this.settings.targetLang)
-    }
-    this.updateLens()
+    this.warmBrowserEngine()
+    this.refreshLensView()
   }
 
   private activateTemporaryLens(downAt: number): void {
@@ -417,10 +496,33 @@ export class LensController {
     this.lensSticky = false
     this.hotkeyDownAt = downAt
     this.ensureMouseSeed()
-    if (this.settings.translationEngine === 'browser') {
-      void this.browserTranslator.prepare(this.settings.sourceLang, this.settings.targetLang)
-    }
+    this.warmBrowserEngine()
+    this.refreshLensView()
+  }
+
+  /** Pre-warm the on-device session with the resolved pair ('auto'-safe). */
+  private warmBrowserEngine(): void {
+    if (this.settings.translationEngine !== 'browser') return
+    void this.effectiveSourceLang().then((source) =>
+      this.browserTranslator.prepare(source, this.settings.targetLang),
+    )
+  }
+
+  /**
+   * First lens render after activation: when focus sits in an editable field,
+   * anchor the writing-mode panel there instead of the (possibly stale) mouse.
+   */
+  private refreshLensView(): void {
+    if (this.tryFocusEditableLens()) return
     this.updateLens()
+  }
+
+  private tryFocusEditableLens(): boolean {
+    if (!this.settings.inputTranslate) return false
+    const target = extractEditableTarget(document.activeElement)
+    if (!target) return false
+    this.updateEditableLens(target)
+    return true
   }
 
   async scanVisibleAndTranslate(): Promise<void> {
@@ -453,15 +555,34 @@ export class LensController {
       return
     }
 
-    const lang = evaluatePageLanguageMatch(this.settings.sourceLang)
-    if (!lang.matches) {
-      if (lang.shouldRetry) {
-        this.scheduleAutoPageRetry(`lang:${lang.reason}`)
-      } else {
-        // Definitive mismatch (e.g. long Chinese body) — stop polling this page.
-        this.abandonAutoPage(`lang:${lang.reason}`)
+    let resolvedSettings = this.settings
+    if (this.settings.sourceLang === 'auto') {
+      // Auto mode: detect the page language once, then run with the resolved pair.
+      const sample = (document.body?.innerText || document.body?.textContent || '').slice(
+        0,
+        12_000,
+      )
+      if (isInsufficientLanguageSample(sample)) {
+        this.scheduleAutoPageRetry('auto:insufficient-sample')
+        return
       }
-      return
+      const resolved = await this.effectiveSourceLang()
+      if (primaryLanguage(resolved) === primaryLanguage(this.settings.targetLang)) {
+        this.abandonAutoPage('auto:page-in-target-language')
+        return
+      }
+      resolvedSettings = { ...this.settings, sourceLang: resolved }
+    } else {
+      const lang = evaluatePageLanguageMatch(this.settings.sourceLang)
+      if (!lang.matches) {
+        if (lang.shouldRetry) {
+          this.scheduleAutoPageRetry(`lang:${lang.reason}`)
+        } else {
+          // Definitive mismatch (e.g. long Chinese body) — stop polling this page.
+          this.abandonAutoPage(`lang:${lang.reason}`)
+        }
+        return
+      }
     }
 
     if (this.settings.pageTranslationEngine === 'external' && !this.configured) {
@@ -470,7 +591,7 @@ export class LensController {
     }
 
     const settingsGeneration = this.settingsGeneration
-    const settings = this.settings
+    const settings = resolvedSettings
     const configured = this.configured
     this.autoPageStartPending = true
     try {
@@ -772,6 +893,12 @@ export class LensController {
       const sourceRect = imageEntry.el.getBoundingClientRect()
       this.lens.highlight(imageEntry.el)
       if (imageEntry.status === 'ready' && imageEntry.translation) {
+        this.lensPayload = {
+          sourceText: '',
+          translation: imageEntry.translation,
+          sourceLang: this.syncSourceLang(),
+          targetLang: this.settings.targetLang,
+        }
         this.lens.showAt(this.lastMouse.x, this.lastMouse.y, {
           kind: 'ready',
           text: imageEntry.translation,
@@ -794,9 +921,19 @@ export class LensController {
     }
 
     if (!this.canTranslateText()) {
+      this.lensPayload = null
       this.lens.showAt(this.lastMouse.x, this.lastMouse.y, { kind: 'unconfigured' })
       this.lens.highlight(null)
       return
+    }
+
+    // Writing mode: editable fields get back-translation + explicit replace.
+    if (this.settings.inputTranslate) {
+      const editable = extractEditableTarget(hit)
+      if (editable) {
+        this.updateEditableLens(editable)
+        return
+      }
     }
 
     // Lens uses deep pointer resolution (caret + tightest unit), not full-page
@@ -830,7 +967,25 @@ export class LensController {
     const sourceRect = entry.el.getBoundingClientRect()
     const sourceText = entry.text
 
+    // Single words get a dictionary card instead of a plain sentence translation.
+    const normText = normalizeText(sourceText)
+    if (
+      this.settings.translationEngine === 'external' &&
+      this.configured &&
+      isDictCandidate(normText) &&
+      this.updateDictLens(entry.id, normText, sourceRect)
+    ) {
+      return
+    }
+
     if (entry.status === 'ready' && entry.translation) {
+      this.lensPayload = {
+        sourceText,
+        translation: entry.translation,
+        sourceLang: this.syncSourceLang(),
+        targetLang: this.settings.targetLang,
+      }
+      this.updateStarMarker(sourceText, this.lensPayload.sourceLang)
       this.lens.showAt(this.lastMouse.x, this.lastMouse.y, {
         kind: 'ready',
         text: entry.translation,
@@ -861,11 +1016,145 @@ export class LensController {
     }
   }
 
+  /**
+   * Editable-field lens state: pending → ready → (explicit) replace. Cache is
+   * keyed by field text, so editing the field re-triggers translation.
+   */
+  private updateEditableLens(target: EditableTarget): void {
+    const key = normalizeText(target.text)
+    const sourceRect = target.el.getBoundingClientRect()
+    this.lens.highlight(target.el)
+
+    const cached = this.editableCache.get(key)
+    if (cached) {
+      this.lensPayload = {
+        sourceText: target.text,
+        translation: cached.translation,
+        sourceLang: cached.sourceLang,
+        targetLang: cached.targetLang,
+        editable: target,
+      }
+      this.updateStarMarker(target.text, cached.sourceLang)
+      this.lens.showAt(this.lastMouse.x, this.lastMouse.y, {
+        kind: 'editable',
+        sourceText: target.text,
+        translation: cached.translation,
+        status: 'ready',
+        writable: target.writable,
+        sourceRect,
+      })
+      return
+    }
+
+    this.lensPayload = {
+      sourceText: target.text,
+      translation: null,
+      sourceLang: this.syncSourceLang(),
+      targetLang: this.settings.targetLang,
+      editable: target,
+    }
+    this.lens.showAt(this.lastMouse.x, this.lastMouse.y, {
+      kind: 'editable',
+      sourceText: target.text,
+      translation: null,
+      status: 'pending',
+      writable: target.writable,
+      sourceRect,
+    })
+
+    if (this.editableInflight.has(key)) return
+    this.editableInflight.add(key)
+    void this.translateInputText(target.text)
+      .then((result) => {
+        if (result) {
+          this.editableCache.set(key, result)
+        } else if (this.lensPayload?.editable && normalizeText(this.lensPayload.editable.text) === key) {
+          this.lens.showAt(this.lastMouse.x, this.lastMouse.y, {
+            kind: 'editable',
+            sourceText: target.text,
+            translation: null,
+            status: 'error',
+            error: '回译失败，请检查引擎或语言包',
+            writable: target.writable,
+            sourceRect,
+          })
+          return
+        }
+        if (this.lensActive) this.updateLens()
+      })
+      .finally(() => {
+        this.editableInflight.delete(key)
+      })
+  }
+
+  /**
+   * Dictionary-card flow for single words (external engine only).
+   * Returns false when the card is unavailable so the caller falls back to the
+   * normal sentence translation.
+   */
+  private updateDictLens(entryId: string, normText: string, sourceRect: DOMRect): boolean {
+    const src =
+      this.settings.sourceLang !== 'auto'
+        ? this.settings.sourceLang
+        : (this.resolvedSourceLang ?? detectLanguageByScript(normText) ?? 'en')
+    const key = `${src}|${this.settings.targetLang}|${normText.toLowerCase()}`
+
+    const cached = this.dictCache.get(key)
+    if (cached) {
+      const gloss = cached.senses[0]?.gloss ?? ''
+      if (gloss) this.registry.setTranslation(entryId, gloss)
+      this.lensPayload = {
+        sourceText: normText,
+        translation: gloss || null,
+        sourceLang: src,
+        targetLang: this.settings.targetLang,
+      }
+      this.updateStarMarker(normText, src)
+      this.lens.showAt(this.lastMouse.x, this.lastMouse.y, {
+        kind: 'dict',
+        entry: cached,
+        sourceText: normText,
+        sourceRect,
+      })
+      return true
+    }
+    if (this.dictErrors.has(key)) return false
+
+    this.lensPayload = {
+      sourceText: normText,
+      translation: null,
+      sourceLang: src,
+      targetLang: this.settings.targetLang,
+    }
+    this.lens.showAt(this.lastMouse.x, this.lastMouse.y, {
+      kind: 'pending',
+      sourceText: normText,
+      sourceRect,
+    })
+
+    if (this.dictInflight.has(key)) return true
+    this.dictInflight.add(key)
+    void this.fetchDictionaryEntry(normText, src)
+      .then((result) => {
+        if (result) this.dictCache.set(key, result)
+        else this.dictErrors.add(key)
+        if (this.lensActive) this.updateLens()
+      })
+      .finally(() => {
+        this.dictInflight.delete(key)
+      })
+    return true
+  }
+
+  private readonly dictErrors = new Set<string>()
+
   private deactivateLens(): void {
     this.lensActive = false
     this.lensSticky = false
     this.hotkeyHeld = false
     this.hotkeyDownAt = 0
+    this.lensPayload = null
+    this.stopSpeaking()
     this.lens.hide()
   }
 
@@ -907,7 +1196,7 @@ export class LensController {
     if (!this.browserTranslator.isSupported()) return
 
     const generation = this.translationGeneration
-    const sourceLang = this.settings.sourceLang
+    const sourceLang = await this.effectiveSourceLang()
     const targetLang = this.settings.targetLang
 
     for (const block of blocks) {
@@ -966,20 +1255,41 @@ export class LensController {
       if (engine === 'browser') {
         await this.translateWithBrowser(todo)
       } else if (configured) {
-        const response: unknown = await chrome.runtime.sendMessage({
-          type: 'translate-batch',
-          pageKey: makePageKey(),
-          blocks: todo,
+        const pageKey = makePageKey()
+        // 'auto' source must be resolved before reaching the background.
+        const sourceLang = await this.effectiveSourceLang()
+        const targetLang = this.settings.targetLang
+        let firstError: string | null = null
+        // Per-line parallel requests: each block is its own API call and renders
+        // the moment it lands, instead of waiting on one big sequential batch.
+        await runWithConcurrency(todo, LENS_TRANSLATION_CONCURRENCY, async (block) => {
+          if (generation !== this.translationGeneration) return
+          try {
+            const response: unknown = await chrome.runtime.sendMessage({
+              type: 'translate-batch',
+              pageKey,
+              blocks: [block],
+              sourceLang,
+              targetLang,
+            })
+            if (generation !== this.translationGeneration) return
+            if (!isTranslateBatchResult(response)) {
+              if (firstError === null) firstError = '翻译服务未返回有效结果'
+              return
+            }
+            for (const item of response.translations ?? []) {
+              this.registry.setTranslation(item.id, item.translation)
+            }
+            if (!response.ok && firstError === null) firstError = response.error
+          } catch (err) {
+            if (firstError === null) {
+              firstError = err instanceof Error ? err.message : String(err)
+            }
+          }
+          if (this.lensActive) this.updateLens()
         })
         if (generation !== this.translationGeneration) return
-        if (!isTranslateBatchResult(response)) {
-          error = '翻译服务未返回有效结果'
-        } else {
-          for (const item of response.translations ?? []) {
-            this.registry.setTranslation(item.id, item.translation)
-          }
-          if (!response.ok) error = response.error
-        }
+        if (firstError !== null) error = firstError
       }
 
       if (generation !== this.translationGeneration) return
@@ -1013,6 +1323,171 @@ export class LensController {
       : this.configured
   }
 
+  // -------------------------------------------------------------------------
+  // TTS / vocabulary / source-language resolution
+  // -------------------------------------------------------------------------
+
+  /** Fire-and-forget speech via the service worker (chrome.tts proxy). */
+  private speak(text: string, lang: string): void {
+    if (!text) return
+    void chrome.runtime
+      .sendMessage({ type: 'tts-speak', text: text.slice(0, 4000), lang })
+      .catch(() => {
+        // Platform without voices — speaking is best-effort.
+      })
+  }
+
+  private stopSpeaking(): void {
+    void chrome.runtime.sendMessage({ type: 'tts-stop' }).catch(() => undefined)
+  }
+
+  private async saveToVocabulary(
+    source: string,
+    translation: string,
+    payload?: { sourceLang: string; targetLang: string },
+  ): Promise<void> {
+    const sourceLang = payload?.sourceLang ?? this.syncSourceLang()
+    const targetLang = payload?.targetLang ?? this.settings.targetLang
+    const entry = await addVocabularyEntry({
+      source,
+      translation,
+      sourceLang,
+      targetLang,
+      pageUrl: location.href,
+    })
+    if (entry) {
+      this.starredKeys.add(vocabularyKey(source, sourceLang, targetLang))
+      this.lens.setStarActive(true)
+    }
+  }
+
+  private updateStarMarker(sourceText: string, sourceLang: string): void {
+    const key = vocabularyKey(sourceText, sourceLang, this.settings.targetLang)
+    this.lens.setStarActive(this.starredKeys.has(key))
+  }
+
+  /**
+   * Resolve the effective source language for `sourceLang: 'auto'` once per
+   * page session (API → script heuristic → 'en' fallback).
+   */
+  private async effectiveSourceLang(): Promise<string> {
+    if (this.settings.sourceLang !== 'auto') return this.settings.sourceLang
+    if (this.resolvedSourceLang) return this.resolvedSourceLang
+    if (!this.resolvingSourceLang) {
+      this.resolvingSourceLang = (async () => {
+        const sample = (document.body?.innerText || document.body?.textContent || '').slice(
+          0,
+          4000,
+        )
+        this.resolvedSourceLang = await resolveSourceLanguage(sample, 'en')
+        return this.resolvedSourceLang
+      })().finally(() => {
+        this.resolvingSourceLang = null
+      })
+    }
+    return this.resolvingSourceLang
+  }
+
+  /** Sync view of the source language for display/labels (detection may be pending). */
+  private syncSourceLang(): string {
+    if (this.settings.sourceLang !== 'auto') return this.settings.sourceLang
+    return this.resolvedSourceLang ?? 'en'
+  }
+
+  // -------------------------------------------------------------------------
+  // Input (writing) translation
+  // -------------------------------------------------------------------------
+
+  /**
+   * Back-translation for editable fields: direction is inferred from the text
+   * (target-script content is translated toward the source side and vice versa).
+   */
+  private async translateInputText(
+    text: string,
+  ): Promise<{ translation: string; sourceLang: string; targetLang: string } | null> {
+    const effSource = await this.effectiveSourceLang()
+    const toTarget = !isPredominantlyTargetLanguage(text, this.settings.targetLang)
+    const sourceLang = toTarget ? effSource : this.settings.targetLang
+    const targetLang = toTarget ? this.settings.targetLang : effSource
+
+    if (this.settings.translationEngine === 'browser') {
+      const translation = await this.browserTranslator.translate(text, sourceLang, targetLang)
+      return translation ? { translation, sourceLang, targetLang } : null
+    }
+    if (!this.configured) return null
+    const response: unknown = await chrome.runtime.sendMessage({
+      type: 'translate-batch',
+      pageKey: makePageKey(),
+      blocks: [{ id: 'input', tag: 'editable', text }],
+      sourceLang,
+      targetLang,
+    })
+    if (!isTranslateBatchResult(response) || !response.ok) return null
+    const translation = response.translations.find((item) => item.id === 'input')?.translation
+    return translation ? { translation, sourceLang, targetLang } : null
+  }
+
+  /**
+   * Replace the field's content with the translation. Prefer execCommand so the
+   * change joins the native undo chain; fall back to value assignment + events
+   * for frameworks that track input/change.
+   */
+  private replaceEditableContent(target: EditableTarget, translation: string): void {
+    const el = target.el
+    el.focus()
+    let done = false
+    try {
+      if (target.kind === 'contenteditable') {
+        done =
+          document.execCommand('selectAll', false) &&
+          document.execCommand('insertText', false, translation)
+      } else {
+        ;(el as HTMLInputElement | HTMLTextAreaElement).select()
+        done = document.execCommand('insertText', false, translation)
+      }
+    } catch {
+      done = false
+    }
+    if (!done) {
+      if (target.kind === 'contenteditable') {
+        el.textContent = translation
+        el.dispatchEvent(
+          new InputEvent('input', { bubbles: true, inputType: 'insertText', data: translation }),
+        )
+      } else {
+        const field = el as HTMLInputElement | HTMLTextAreaElement
+        field.value = translation
+        field.dispatchEvent(new Event('input', { bubbles: true }))
+        field.dispatchEvent(new Event('change', { bubbles: true }))
+      }
+    }
+    // Reflect the replacement in the registry so the lens shows fresh text.
+    this.editableCache.set(normalizeText(translation), {
+      translation,
+      sourceLang: this.settings.targetLang,
+      targetLang: this.syncSourceLang(),
+    })
+    this.updateLens()
+  }
+
+  // -------------------------------------------------------------------------
+  // Dictionary card (single-word lens, external engine)
+  // -------------------------------------------------------------------------
+
+  private async fetchDictionaryEntry(
+    text: string,
+    sourceLang: string,
+  ): Promise<DictionaryEntry | null> {
+    const response: unknown = await chrome.runtime.sendMessage({
+      type: 'translate-dict',
+      text,
+      sourceLanguage: sourceLang,
+      targetLanguage: this.settings.targetLang,
+    })
+    if (!isTranslateDictResult(response) || !response.ok) return null
+    return response.entry
+  }
+
   private syncAutoScanObserver(): void {
     if (this.settings.autoTranslate && !this.pausedHere) {
       if (!this.autoScanMo) {
@@ -1036,7 +1511,7 @@ export class LensController {
   /**
    * Gate browser / external engines before starting lens or full-page mode.
    * Shows an in-page prompt when a language pack is missing or LLM is unconfigured.
-   * `quiet` skips the modal (used by selection translate; prompt is rate-limited there).
+   * `quiet` skips the modal (required for selection translate — never interrupt reading).
    */
   private async ensureEngineReady(
     mode: 'lens' | 'page',
@@ -1056,23 +1531,23 @@ export class LensController {
       }
     }
 
-    if (!this.browserTranslator.isSupported()) {
-      if (!quiet) this.showEngineSetupPrompt({ kind: 'browser-unsupported' })
-      return { ok: false, error: '当前浏览器不支持 Chrome 内置翻译' }
-    }
-
+    // Hybrid probe: page-local first, extension host fallback (never sticky-remote).
     const availability = await this.browserTranslator.availability(
-      this.settings.sourceLang,
+      await this.effectiveSourceLang(),
       this.settings.targetLang,
     )
     if (availability === 'available') return { ok: true }
+    if (availability === 'unsupported') {
+      if (!quiet) this.showEngineSetupPrompt({ kind: 'browser-unsupported' })
+      return { ok: false, error: '当前浏览器不支持 Chrome 内置翻译（需桌面版 Chrome 138+）' }
+    }
 
     if (!quiet) this.showEngineSetupPrompt({ kind: 'language-pack', availability })
 
     const message =
-      availability === 'unavailable'
-        ? '当前语言对在 Chrome 内置翻译中不可用'
-        : '需要先下载 Chrome 语言包'
+      availability === 'downloadable' || availability === 'downloading'
+        ? '需要先下载 Chrome 语言包'
+        : 'Chrome 内置翻译暂时不可用（语言包未就绪或本页策略限制），请稍后重试或改用外部 LLM'
     return { ok: false, error: message }
   }
 
@@ -1106,56 +1581,59 @@ export class LensController {
                   window.setTimeout(() => this.setupPrompt.dismiss(), 900)
                   return
                 }
-                this.setupPrompt.setStatus('语言包下载失败，请改用外部 LLM 或更换语言', true)
+                const detail = this.browserTranslator.lastError?.trim()
+                this.setupPrompt.setStatus(
+                  detail
+                    ? `语言包下载失败：${detail}`
+                    : '语言包下载失败，请检查网络或改用外部 LLM',
+                  true,
+                )
               }
             : undefined,
         onOpenLlmSetup: () => {
-          void chrome.runtime.sendMessage({ type: 'open-options', hash: '#external-api' })
+          void chrome.runtime
+            .sendMessage({ type: 'open-options', hash: '#external-api' })
+            .catch(() => {
+              /* options open is best-effort; never surface as unhandled rejection */
+            })
         },
         onOpenOnboarding: () => {
-          void chrome.runtime.sendMessage({ type: 'open-options', hash: '#onboarding' })
+          void chrome.runtime
+            .sendMessage({ type: 'open-options', hash: '#onboarding' })
+            .catch(() => {
+              /* options open is best-effort */
+            })
         },
       },
     )
   }
 
+  /**
+   * Selection translate must never open setup modals or options pages.
+   * Fail quietly into the selection panel only — popups interrupt normal reading.
+   */
   private async translateSelectionText(text: string): Promise<string | null> {
     if (this.pausedHere) return null
     if (this.settings.translationEngine === 'browser') {
       const ready = await this.ensureEngineReady('lens', { quiet: true })
-      if (!ready.ok) {
-        this.maybePromptSetupFromSelection()
-        throw new Error(ready.error)
-      }
+      if (!ready.ok) return null
       return this.browserTranslator.translate(
         text,
-        this.settings.sourceLang,
+        await this.effectiveSourceLang(),
         this.settings.targetLang,
       )
     }
     const ready = await this.ensureEngineReady('lens', { quiet: true })
-    if (!ready.ok) {
-      this.maybePromptSetupFromSelection()
-      throw new Error(ready.error)
-    }
+    if (!ready.ok) return null
     const response: unknown = await chrome.runtime.sendMessage({
       type: 'translate-batch',
       pageKey: makePageKey(),
       blocks: [{ id: 'sel', tag: 'selection', text }],
+      sourceLang: await this.effectiveSourceLang(),
+      targetLang: this.settings.targetLang,
     })
-    if (!isTranslateBatchResult(response) || !response.ok) {
-      if (isTranslateBatchResult(response) && !response.ok) throw new Error(response.error)
-      throw new Error('翻译服务未返回有效结果')
-    }
+    if (!isTranslateBatchResult(response) || !response.ok) return null
     return response.translations.find((item) => item.id === 'sel')?.translation ?? null
-  }
-
-  /** At most one full setup modal per minute from selection-driven failures. */
-  private maybePromptSetupFromSelection(): void {
-    const now = Date.now()
-    if (now - this.lastSelectionSetupPromptAt < 60_000) return
-    this.lastSelectionSetupPromptAt = now
-    void this.ensureEngineReady('lens')
   }
 
   private bubbleState(): BubbleControlResult {
@@ -1172,8 +1650,23 @@ export class LensController {
       const result = await this.toggleStickyLensAsync()
       return result.ok ? this.bubbleState() : result
     }
+    if (message.command === 'retranslate-page') {
+      const result = await this.retranslatePage()
+      return result.ok ? this.bubbleState() : result
+    }
     const result = await this.togglePageTranslation()
     return result.ok ? this.bubbleState() : result
+  }
+
+  /** Bubble “重新翻译”: rerun full-page translation with caches bypassed. */
+  private async retranslatePage(): Promise<TogglePageTranslationResult> {
+    const ready = await this.ensureEngineReady('page')
+    if (!ready.ok) return ready
+    if (this.lensActive) this.deactivateLens()
+    this.suppressAutoPage('user-open')
+    const settings = { ...this.settings, sourceLang: await this.effectiveSourceLang() }
+    await this.pageTranslator.refresh(settings, this.configured)
+    return { ok: true }
   }
 
   private imageEntryForHit(hit: Element | null): ImageTranslationEntry | undefined {
@@ -1194,12 +1687,28 @@ export class LensController {
   }
 }
 
+function isTranslateDictResult(value: unknown): value is TranslateDictResult {
+  if (!value || typeof value !== 'object' || !('type' in value) || !('ok' in value)) return false
+  if (value.type !== 'translate-dict-result' || typeof value.ok !== 'boolean') return false
+  return value.ok
+    ? 'entry' in value && typeof value.entry === 'object'
+    : 'error' in value && typeof value.error === 'string'
+}
+
+/** Single word or two-word phrase (letters/marks only) — dictionary-card candidate. */
+const DICT_CANDIDATE_RE = /^[\p{L}\p{M}'-]+(?: [\p{L}\p{M}'-]+)?$/u
+
+function isDictCandidate(normalizedText: string): boolean {
+  return normalizedText.length <= 60 && DICT_CANDIDATE_RE.test(normalizedText)
+}
+
 function isBubbleControlMessage(value: object): value is BubbleControlMsg {
   if (!('command' in value)) return false
   return (
     value.command === 'get-state' ||
     value.command === 'toggle-page-translation' ||
-    value.command === 'toggle-lens'
+    value.command === 'toggle-lens' ||
+    value.command === 'retranslate-page'
   )
 }
 

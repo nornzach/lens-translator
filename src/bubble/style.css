@@ -194,6 +194,11 @@ select {
   background: var(--lt-surface-2);
 }
 
+#pageRefresh {
+  grid-column: 1 / -1;
+  min-height: 44px;
+}
+
 .action-button {
   min-width: 0;
   min-height: 60px;
@@ -605,4 +610,15 @@ footer {
     animation-duration: 1ms !important;
     transition-duration: 1ms !important;
   }
+}
+
+.section-title small {
+  margin-left: auto;
+  color: var(--muted, #64748b);
+  font-size: 11px;
+  font-weight: 400;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

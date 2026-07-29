@@ -11,11 +11,22 @@ export type HotkeyConfig = {
 export type TranslationEngine = 'external' | 'browser'
 export type TranslationFontFamily = 'system' | 'sans' | 'serif' | 'mono'
 
+/** Per-host override resolved by the service worker before settings reach content scripts. */
+export type SiteRule = {
+  /** force-on: always auto page-translate this host; force-off: never auto-start. */
+  autoPage?: 'force-on' | 'force-off'
+  /** Engine override for both lens and full-page mode on this host. */
+  engine?: TranslationEngine
+}
+
+/** How rendered translations appear in full-page mode. */
+export type PageTranslationDisplayMode = 'bilingual' | 'translation-only' | 'learning'
+
 export type UserSettings = {
   baseURL: string
   apiKey: string
   model: string
-  /** auto | openai | deepseek | stepfun */
+  /** auto | openai | deepseek | stepfun | alibaba */
   provider: ProviderId
   /**
    * Thinking / reasoning for providers that support it.
@@ -38,6 +49,12 @@ export type UserSettings = {
   selectionTranslate: boolean
   /** Show the edge-docked floating control bubble on normal pages. */
   showFloatingBubble: boolean
+  /** Lens works on editable fields: shows back-translation with an explicit replace action. */
+  inputTranslate: boolean
+  /** Per-host rules (always auto-translate / engine override). "Never translate" stays in pausedHostnames. */
+  siteRules: Record<string, SiteRule>
+  /** Full-page rendering mode: appended bilingual, translation-only, or hover-to-reveal. */
+  pageTranslationDisplayMode: PageTranslationDisplayMode
   /** First-run setup wizard completed (or explicitly skipped). */
   onboardingCompleted: boolean
   pageTranslationFontFamily: TranslationFontFamily
@@ -74,6 +91,9 @@ export const DEFAULT_SETTINGS: UserSettings = {
   autoPageTranslation: false,
   selectionTranslate: true,
   showFloatingBubble: true,
+  inputTranslate: true,
+  siteRules: {},
+  pageTranslationDisplayMode: 'bilingual',
   onboardingCompleted: false,
   pageTranslationFontFamily: 'system',
   pageTranslationFontSizePx: 14,
@@ -106,7 +126,15 @@ export const DEFAULT_SETTINGS: UserSettings = {
 }
 
 function asProviderId(v: unknown): ProviderId {
-  if (v === 'openai' || v === 'deepseek' || v === 'stepfun' || v === 'auto') return v
+  if (
+    v === 'openai' ||
+    v === 'deepseek' ||
+    v === 'stepfun' ||
+    v === 'alibaba' ||
+    v === 'auto'
+  ) {
+    return v
+  }
   return DEFAULT_SETTINGS.provider
 }
 
@@ -155,6 +183,28 @@ function hotkeyValue(value: unknown, fallback: HotkeyConfig): HotkeyConfig {
   }
 }
 
+const HOST_KEY_RE = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i
+
+/** Untrusted persisted site rules: enum-checked, host-shaped keys, bounded count. */
+function siteRulesValue(value: unknown): Record<string, SiteRule> {
+  if (!isRecord(value)) return {}
+  const out: Record<string, SiteRule> = {}
+  for (const [rawHost, rawRule] of Object.entries(value)) {
+    if (Object.keys(out).length >= 500) break
+    const host = rawHost.trim().toLowerCase()
+    if (!host || host.length > 253 || !HOST_KEY_RE.test(host) || !isRecord(rawRule)) continue
+    const rule: SiteRule = {}
+    if (rawRule.autoPage === 'force-on' || rawRule.autoPage === 'force-off') {
+      rule.autoPage = rawRule.autoPage
+    }
+    if (rawRule.engine === 'browser' || rawRule.engine === 'external') {
+      rule.engine = rawRule.engine
+    }
+    if (rule.autoPage || rule.engine) out[host] = rule
+  }
+  return out
+}
+
 /** Validate persisted/untrusted settings and fill every omitted or malformed field. */
 export function mergeSettings(partial: unknown): UserSettings {
   const p = isRecord(partial) ? partial : {}
@@ -185,6 +235,16 @@ export function mergeSettings(partial: unknown): UserSettings {
       typeof p.showFloatingBubble === 'boolean'
         ? p.showFloatingBubble
         : DEFAULT_SETTINGS.showFloatingBubble,
+    inputTranslate:
+      typeof p.inputTranslate === 'boolean'
+        ? p.inputTranslate
+        : DEFAULT_SETTINGS.inputTranslate,
+    siteRules: siteRulesValue(p.siteRules),
+    pageTranslationDisplayMode:
+      p.pageTranslationDisplayMode === 'translation-only' ||
+      p.pageTranslationDisplayMode === 'learning'
+        ? p.pageTranslationDisplayMode
+        : DEFAULT_SETTINGS.pageTranslationDisplayMode,
     // Missing flag on an existing saved blob = upgrade; only brand-new installs see the wizard.
     onboardingCompleted:
       typeof p.onboardingCompleted === 'boolean'

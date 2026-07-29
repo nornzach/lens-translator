@@ -101,6 +101,49 @@ export function normalizeLangCode(code: string): string {
   return code.trim().toLowerCase()
 }
 
+/**
+ * Preferred single tag for a UI language code (first candidate).
+ * Prefer probing with {@link translatorLanguageTagCandidates} — Chrome builds
+ * disagree on `zh` vs `zh-Hans` vs `zh-CN`.
+ */
+export function toTranslatorLanguageTag(code: string): string {
+  return translatorLanguageTagCandidates(code)[0] ?? code.trim()
+}
+
+/**
+ * Ordered BCP-47 candidates for Chrome Translator API.
+ * Different Chrome channels accept different Chinese tags; try in order until
+ * availability is not `unavailable`.
+ */
+export function translatorLanguageTagCandidates(code: string): string[] {
+  const raw = code.trim()
+  if (!raw) return []
+  const lower = raw.toLowerCase()
+
+  // Simplified Chinese family — try bare `zh` first (works on many stable builds),
+  // then script/region forms used by newer Chromium.
+  if (lower === 'zh' || lower === 'zh-cn' || lower === 'zh-hans' || lower === 'zh-sg') {
+    return uniqueTags(['zh', 'zh-Hans', 'zh-CN'])
+  }
+  if (lower === 'zh-tw' || lower === 'zh-hk' || lower === 'zh-mo' || lower === 'zh-hant') {
+    return uniqueTags(['zh-Hant', 'zh-TW', 'zh-HK', 'zh'])
+  }
+
+  if (!raw.includes('-')) return [lower]
+  return uniqueTags([raw, lower, lower.split('-')[0]!])
+}
+
+function uniqueTags(tags: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const tag of tags) {
+    if (!tag || seen.has(tag)) continue
+    seen.add(tag)
+    out.push(tag)
+  }
+  return out
+}
+
 export function languageName(code: string): string {
   const raw = normalizeLangCode(code)
   if (!raw) return '未知语言'

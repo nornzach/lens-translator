@@ -40,3 +40,55 @@ describe('parseImageTranslationResult', () => {
     })
   })
 })
+
+describe('parseDictionaryResult', () => {
+  it('parses a full dictionary card', async () => {
+    const { parseDictionaryResult } = await import('../../src/shared/schema')
+    const parsed = parseDictionaryResult(
+      {
+        word: 'ubiquitous',
+        phonetic: '/juːˈbɪkwɪtəs/',
+        senses: [
+          { pos: 'adj.', gloss: '无处不在的' },
+          { pos: '', gloss: '普遍存在的' },
+        ],
+        examples: [{ source: 'Wi-Fi is ubiquitous.', translation: 'Wi-Fi 无处不在。' }],
+      },
+      'ubiquitous',
+    )
+    expect(parsed).toEqual({
+      ok: true,
+      entry: {
+        word: 'ubiquitous',
+        phonetic: '/juːˈbɪkwɪtəs/',
+        senses: [
+          { pos: 'adj.', gloss: '无处不在的' },
+          { pos: '', gloss: '普遍存在的' },
+        ],
+        examples: [{ source: 'Wi-Fi is ubiquitous.', translation: 'Wi-Fi 无处不在。' }],
+      },
+    })
+  })
+
+  it('falls back to the input word, drops invalid rows, and requires senses', async () => {
+    const { parseDictionaryResult } = await import('../../src/shared/schema')
+    const parsed = parseDictionaryResult(
+      {
+        senses: [{ pos: 'n.', gloss: '测试' }, { pos: 'x' }, 'garbage'],
+        examples: [{ source: '', translation: 'skip' }, { source: '例', translation: 'example' }],
+      },
+      'fallback-word',
+    )
+    expect(parsed).toEqual({
+      ok: true,
+      entry: {
+        word: 'fallback-word',
+        senses: [{ pos: 'n.', gloss: '测试' }],
+        examples: [{ source: '例', translation: 'example' }],
+      },
+    })
+
+    expect(parseDictionaryResult({ senses: [] }, 'w').ok).toBe(false)
+    expect(parseDictionaryResult('nope', 'w').ok).toBe(false)
+  })
+})

@@ -6,22 +6,30 @@ import type {
   SettingsMsg,
   ToBackground,
   TranslateBlock,
+  TtsSpeakResult,
 } from '../shared/messages'
 import {
-  filterUncachedByText,
-  expandTranslationsToAllIds,
-  translateBlocksSingleFlight,
+  translateBatchWithCaches,
+  translateDictionaryEntry,
   translateImage,
   testConnection,
   testVisionCapability,
+  listAvailableModels,
+  translationCacheOverview,
+  clearAllTranslationCaches,
   ensureCacheHydrated,
   persistTranslationCache,
 } from './translate'
+import { handleBrowserTranslatorRequest, handleCloseTranslatorHost } from './browser-translate'
 
 const CONTEXT_PANEL = 'open-control-panel'
 const CONTEXT_OPTIONS = 'open-options'
 
 chrome.runtime.onMessage.addListener((rawMessage: unknown, sender, sendResponse) => {
+  // Offscreen-targeted messages must not be answered here — SW also receives its own
+  // chrome.runtime.sendMessage broadcasts, and a second sendResponse races the offscreen host.
+  if (isOffscreenTargeted(rawMessage)) return false
+
   if (sender.id !== chrome.runtime.id || !isToBackground(rawMessage)) {
     sendResponse({ type: 'translate-batch-result', ok: false, error: 'invalid message' })
     return false
@@ -51,8 +59,20 @@ function errorResponse(message: ToBackground, error: unknown): FromBackground {
   if (message.type === 'test-vision') {
     return { type: 'test-vision-result', ok: false, error: detail }
   }
+  if (message.type === 'list-models') {
+    return { type: 'list-models-result', ok: false, error: detail }
+  }
+  if (message.type === 'get-cache-stats') {
+    return { type: 'cache-stats-result', ok: false, error: detail }
+  }
+  if (message.type === 'clear-translation-cache') {
+    return { type: 'clear-translation-cache-result', ok: false, error: detail }
+  }
   if (message.type === 'open-options') {
     return { type: 'open-options-result', ok: false }
+  }
+  if (message.type === 'browser-translator') {
+    return { type: 'browser-translator-result', ok: false, error: detail }
   }
   return {
     type: 'background-error',
@@ -60,6 +80,68 @@ function errorResponse(message: ToBackground, error: unknown): FromBackground {
     requestType: message.type,
     error: detail,
   }
+}
+
+/** Host-targeted messages are answered by the translator host page, not the SW. */
+function isOffscreenTargeted(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || !('target' in value)) return false
+  const target = (value as { target?: unknown }).target
+  return target === 'offscreen' || target === 'translator-host'
+}
+
+/**
+ * chrome.tts is unavailable in content scripts, so the SW proxies it.
+ * Language is restricted to the configured pair to avoid becoming a free TTS
+ * relay for arbitrary content.
+ */
+async function ttsSpeak(text: string, lang: string): Promise<TtsSpeakResult> {
+  if (!chrome.tts) return { type: 'tts-speak-result', ok: false, error: 'tts unavailable' }
+  const settings = await loadSettings()
+  const allowed = new Set([settings.targetLang.toLowerCase()])
+  if (settings.sourceLang !== 'auto') allowed.add(settings.sourceLang.toLowerCase())
+  const requested = lang.toLowerCase()
+  // Auto mode: detected source varies per page — accept any plausible BCP-47 tag.
+  const plausible = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(requested)
+  if (!allowed.has(requested) && !(settings.sourceLang === 'auto' && plausible)) {
+    return { type: 'tts-speak-result', ok: false, error: 'language not allowed' }
+  }
+  // Resolve once playback actually starts (or fails) — holding the message
+  // channel open until the utterance ends would stall the caller for minutes
+  // on long text.
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (result: TtsSpeakResult) => {
+      if (!settled) {
+        settled = true
+        resolve(result)
+      }
+    }
+    try {
+      chrome.tts.stop()
+      chrome.tts.speak(text, {
+        lang,
+        rate: 1.0,
+        onEvent: (event) => {
+          if (event.type === 'start') done({ type: 'tts-speak-result', ok: true })
+          else if (event.type === 'error') {
+            done({
+              type: 'tts-speak-result',
+              ok: false,
+              error: event.errorMessage ?? 'tts error',
+            })
+          }
+        },
+      })
+      // Some platforms never fire events — assume started rather than hanging.
+      setTimeout(() => done({ type: 'tts-speak-result', ok: true }), 1500)
+    } catch (error) {
+      done({
+        type: 'tts-speak-result',
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  })
 }
 
 // Content scripts declared in the manifest only load on navigation, so tabs open
@@ -248,11 +330,10 @@ function settingsForContent(settings: UserSettings, hostname = ''): SettingsMsg 
     sourceLang,
     targetLang,
     autoTranslate,
-    translationEngine,
-    pageTranslationEngine,
-    autoPageTranslation,
     selectionTranslate,
     showFloatingBubble,
+    inputTranslate,
+    pageTranslationDisplayMode,
     pageTranslationFontFamily,
     pageTranslationFontSizePx,
     pageTranslationUseCustomColor,
@@ -269,6 +350,20 @@ function settingsForContent(settings: UserSettings, hostname = ''): SettingsMsg 
     hotkey,
     pageTranslationHotkey,
   } = settings
+
+  // Per-host rules are resolved here, at the trusted boundary, so content
+  // scripts only ever see the effective result.
+  const rule = hostname ? settings.siteRules[hostname.toLowerCase()] : undefined
+  const engineOverride = rule?.engine
+  const autoPageTranslation =
+    rule?.autoPage === 'force-on'
+      ? true
+      : rule?.autoPage === 'force-off'
+        ? false
+        : settings.autoPageTranslation
+  const translationEngine = engineOverride ?? settings.translationEngine
+  const pageTranslationEngine = engineOverride ?? settings.pageTranslationEngine
+
   return {
     type: 'settings',
     settings: {
@@ -280,6 +375,8 @@ function settingsForContent(settings: UserSettings, hostname = ''): SettingsMsg 
       autoPageTranslation,
       selectionTranslate,
       showFloatingBubble,
+      inputTranslate,
+      pageTranslationDisplayMode,
       pageTranslationFontFamily,
       pageTranslationFontSizePx,
       pageTranslationUseCustomColor,
@@ -299,6 +396,7 @@ function settingsForContent(settings: UserSettings, hostname = ''): SettingsMsg 
     },
     paused: hostname ? settings.pausedHostnames.includes(hostname) : false,
     configured: isConfigured(settings),
+    siteRule: rule ? { ...(rule.autoPage ? { autoPage: rule.autoPage } : {}), ...(rule.engine ? { engine: rule.engine } : {}) } : null,
   }
 }
 
@@ -332,6 +430,7 @@ function isTranslateBlock(value: unknown): value is TranslateBlock {
 function isToBackground(value: unknown): value is ToBackground {
   if (!isRecord(value) || typeof value.type !== 'string') return false
   if (value.type === 'get-settings') return true
+  if (value.type === 'close-translator-host') return true
   if (value.type === 'open-options') {
     return value.hash === undefined || (typeof value.hash === 'string' && value.hash.length <= 128)
   }
@@ -359,6 +458,13 @@ function isToBackground(value: unknown): value is ToBackground {
     ) {
       return false
     }
+    // Optional language-pair override (input back-translation etc.).
+    for (const lang of [value.sourceLang, value.targetLang]) {
+      if (lang !== undefined && (typeof lang !== 'string' || !lang.length || lang.length > 32)) {
+        return false
+      }
+    }
+    if (value.forceRefresh !== undefined && typeof value.forceRefresh !== 'boolean') return false
     let totalChars = 0
     for (const block of value.blocks) {
       if (!isTranslateBlock(block)) return false
@@ -367,6 +473,31 @@ function isToBackground(value: unknown): value is ToBackground {
     }
     return true
   }
+  if (value.type === 'translate-dict') {
+    return (
+      typeof value.text === 'string' &&
+      value.text.length > 0 &&
+      value.text.length <= 200 &&
+      typeof value.sourceLanguage === 'string' &&
+      value.sourceLanguage.length > 0 &&
+      value.sourceLanguage.length <= 32 &&
+      typeof value.targetLanguage === 'string' &&
+      value.targetLanguage.length > 0 &&
+      value.targetLanguage.length <= 32
+    )
+  }
+  if (value.type === 'tts-speak') {
+    return (
+      typeof value.text === 'string' &&
+      value.text.length > 0 &&
+      value.text.length <= 4000 &&
+      typeof value.lang === 'string' &&
+      value.lang.length > 0 &&
+      value.lang.length <= 32
+    )
+  }
+  if (value.type === 'tts-stop') return true
+  if (value.type === 'get-cache-stats' || value.type === 'clear-translation-cache') return true
   if (value.type === 'test-connection' || value.type === 'test-vision') {
     return (
       typeof value.baseURL === 'string' &&
@@ -378,12 +509,49 @@ function isToBackground(value: unknown): value is ToBackground {
       (value.provider === 'auto' ||
         value.provider === 'openai' ||
         value.provider === 'deepseek' ||
-        value.provider === 'stepfun') &&
+        value.provider === 'stepfun' ||
+        value.provider === 'alibaba') &&
       (value.reasoningPref === 'off' ||
         value.reasoningPref === 'low' ||
         value.reasoningPref === 'medium' ||
         value.reasoningPref === 'high')
     )
+  }
+  if (value.type === 'list-models') {
+    return (
+      typeof value.baseURL === 'string' &&
+      value.baseURL.length <= 2048 &&
+      typeof value.apiKey === 'string' &&
+      value.apiKey.length <= 512
+    )
+  }
+  if (value.type === 'browser-translator') {
+    if (value.op === 'is-supported') return true
+    if (
+      (value.op === 'availability' || value.op === 'prepare') &&
+      typeof value.sourceLanguage === 'string' &&
+      value.sourceLanguage.length > 0 &&
+      value.sourceLanguage.length <= 32 &&
+      typeof value.targetLanguage === 'string' &&
+      value.targetLanguage.length > 0 &&
+      value.targetLanguage.length <= 32
+    ) {
+      return true
+    }
+    if (
+      value.op === 'translate' &&
+      typeof value.text === 'string' &&
+      value.text.length <= 50_000 &&
+      typeof value.sourceLanguage === 'string' &&
+      value.sourceLanguage.length > 0 &&
+      value.sourceLanguage.length <= 32 &&
+      typeof value.targetLanguage === 'string' &&
+      value.targetLanguage.length > 0 &&
+      value.targetLanguage.length <= 32
+    ) {
+      return true
+    }
+    return false
   }
   return false
 }
@@ -412,6 +580,14 @@ async function handle(
     return { type: 'open-options-result', ok }
   }
 
+  if (message.type === 'browser-translator') {
+    return handleBrowserTranslatorRequest(message)
+  }
+
+  if (message.type === 'close-translator-host') {
+    return handleCloseTranslatorHost(sender)
+  }
+
   if (message.type === 'translate-image') {
     const settings = await loadSettings()
     if (!isConfigured(settings)) {
@@ -427,6 +603,40 @@ async function handle(
       : { type: 'translate-image-result', ok: false, error: result.error }
   }
 
+  if (message.type === 'tts-speak') {
+    return ttsSpeak(message.text, message.lang)
+  }
+
+  if (message.type === 'tts-stop') {
+    try {
+      chrome.tts?.stop()
+    } catch {
+      // tts unavailable on this platform
+    }
+    return { type: 'tts-speak-result', ok: true }
+  }
+
+  if (message.type === 'translate-dict') {
+    const settings = await loadSettings()
+    if (!isConfigured(settings)) {
+      return {
+        type: 'translate-dict-result',
+        ok: false,
+        error: '词典模式需要配置外部 API',
+      }
+    }
+    await ensureCacheHydrated()
+    const result = await translateDictionaryEntry(
+      message.text,
+      message.sourceLanguage,
+      message.targetLanguage,
+      settings,
+    )
+    return result.ok
+      ? { type: 'translate-dict-result', ok: true, entry: result.entry }
+      : { type: 'translate-dict-result', ok: false, error: result.error }
+  }
+
   if (message.type === 'translate-batch') {
     const settings = await loadSettings()
     if (!isConfigured(settings)) {
@@ -438,60 +648,66 @@ async function handle(
       }
     }
 
+    const sourceLang =
+      message.sourceLang ?? (settings.sourceLang === 'auto' ? 'en' : settings.sourceLang)
+    const targetLang = message.targetLang ?? settings.targetLang
+    // Overrides must reach the prompt, not only the cache key — carry them in
+    // the settings object handed to the translation pipeline.
+    const effectiveSettings = { ...settings, sourceLang, targetLang }
+
     await ensureCacheHydrated()
-    const { cached, missing, textHashToIds, idToText } = filterUncachedByText(
-      message.pageKey,
-      settings.sourceLang,
-      settings.targetLang,
-      message.blocks,
-    )
-
-    if (missing.length === 0) {
-      return { type: 'translate-batch-result', ok: true, translations: cached }
-    }
-
-    const result = await translateBlocksSingleFlight(
-      message.pageKey,
-      settings.sourceLang,
-      settings.targetLang,
-      missing,
-      settings,
-    )
-    const expanded = expandTranslationsToAllIds(
-      message.pageKey,
-      settings.sourceLang,
-      settings.targetLang,
-      result.translations,
-      idToText,
-      textHashToIds,
-    )
+    const result = await translateBatchWithCaches({
+      pageKey: message.pageKey,
+      sourceLang,
+      targetLang,
+      blocks: message.blocks,
+      settings: effectiveSettings,
+      forceRefresh: message.forceRefresh,
+    })
     if (result.translations.length) await persistTranslationCache()
-    const translations = [...cached, ...expanded]
 
     if (result.ok) {
-      return { type: 'translate-batch-result', ok: true, translations }
-    }
-
-    const cacheKeyById = new Map<string, string>()
-    for (const [cacheKey, ids] of textHashToIds) {
-      for (const id of ids) cacheKeyById.set(id, cacheKey)
-    }
-    const failedSet = new Set<string>()
-    for (const failedId of result.failedIds) {
-      const cacheKey = cacheKeyById.get(failedId)
-      if (!cacheKey) {
-        failedSet.add(failedId)
-        continue
-      }
-      for (const id of textHashToIds.get(cacheKey) ?? [failedId]) failedSet.add(id)
+      return { type: 'translate-batch-result', ok: true, translations: result.translations }
     }
     return {
       type: 'translate-batch-result',
       ok: false,
       error: result.error,
-      failedIds: [...failedSet],
-      translations,
+      failedIds: result.failedIds,
+      translations: result.translations,
     }
+  }
+
+  if (message.type === 'get-cache-stats' || message.type === 'clear-translation-cache') {
+    // Cache management is a settings-surface feature, same trust rule as list-models.
+    if (!sender.url?.startsWith(chrome.runtime.getURL(''))) {
+      return {
+        type: message.type === 'get-cache-stats' ? 'cache-stats-result' : 'clear-translation-cache-result',
+        ok: false,
+        error: '仅设置页可管理翻译缓存',
+      }
+    }
+    if (message.type === 'get-cache-stats') {
+      const overview = await translationCacheOverview()
+      return { type: 'cache-stats-result', ok: true, ...overview }
+    }
+    await clearAllTranslationCaches()
+    return { type: 'clear-translation-cache-result', ok: true }
+  }
+
+  if (message.type === 'list-models') {
+    // Same trusted-origin rule as the connectivity tests: the key may be unsaved.
+    if (!sender.url?.startsWith(chrome.runtime.getURL(''))) {
+      return { type: 'list-models-result', ok: false, error: '仅设置页可获取模型列表' }
+    }
+    const stored = await loadSettings()
+    const result = await listAvailableModels(
+      message.baseURL.trim(),
+      message.apiKey.trim() || stored.apiKey,
+    )
+    return result.ok
+      ? { type: 'list-models-result', ok: true, models: result.models }
+      : { type: 'list-models-result', ok: false, error: result.error }
   }
 
   if (message.type === 'test-connection' || message.type === 'test-vision') {

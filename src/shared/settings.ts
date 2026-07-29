@@ -24,4 +24,6 @@ export type {
   HotkeyConfig,
   TranslationEngine,
   TranslationFontFamily,
+  SiteRule,
+  PageTranslationDisplayMode,
 } from './settings-defaults'

@@ -5,11 +5,20 @@ import {
   isConfigured,
   missingConfigFields,
   type HotkeyConfig,
+  type SiteRule,
   type TranslationEngine,
   type UserSettings,
 } from '../shared/settings'
+import {
+  clearVocabulary,
+  loadVocabulary,
+  removeVocabularyEntry,
+  vocabularyToAnkiTsv,
+  vocabularyToCsv,
+  type VocabularyEntry,
+} from '../shared/vocabulary'
 import { formatHotkeyLabel, hotkeyFromKeyboardEvent, hotkeysEqual } from '../shared/hotkey'
-import { languagePairLabel } from '../shared/languages'
+import { languageName, languagePairLabel } from '../shared/languages'
 import {
   PROVIDER_PRESETS,
   type ProviderId,
@@ -19,7 +28,13 @@ import {
   BrowserTranslator,
   type BrowserTranslatorAvailability,
 } from '../content/browser-translator'
-import type { TestConnectionResult, TestVisionResult } from '../shared/messages'
+import type {
+  CacheStatsResult,
+  ClearTranslationCacheResult,
+  ListModelsResult,
+  TestConnectionResult,
+  TestVisionResult,
+} from '../shared/messages'
 
 const browserTranslator = new BrowserTranslator()
 let browserCapability: BrowserTranslatorAvailability = 'unsupported'
@@ -83,14 +98,20 @@ function parsePausedHostnames(raw: string): string[] {
 function populateLanguageSelects(): void {
   for (const id of ['sourceLang', 'targetLang']) {
     const select = el<HTMLSelectElement>(id)
-    select.replaceChildren(
-      ...LANGUAGE_OPTIONS.map(([code, name]) => {
-        const option = document.createElement('option')
-        option.value = code
-        option.textContent = `${name} · ${code}`
-        return option
-      }),
-    )
+    const options = LANGUAGE_OPTIONS.map(([code, name]) => {
+      const option = document.createElement('option')
+      option.value = code
+      option.textContent = `${name} · ${code}`
+      return option
+    })
+    if (id === 'sourceLang') {
+      const auto = document.createElement('option')
+      auto.value = 'auto'
+      auto.textContent = '自动检测'
+      select.replaceChildren(auto, ...options)
+    } else {
+      select.replaceChildren(...options)
+    }
   }
 }
 
@@ -151,9 +172,13 @@ function fillForm(s: UserSettings): void {
   el<HTMLInputElement>('autoTranslate').checked = s.autoTranslate
   el<HTMLInputElement>('selectionTranslate').checked = s.selectionTranslate
   el<HTMLInputElement>('showFloatingBubble').checked = s.showFloatingBubble
+  el<HTMLInputElement>('inputTranslate').checked = s.inputTranslate
   el<HTMLSelectElement>('translationEngine').value = s.translationEngine
   el<HTMLSelectElement>('pageTranslationEngine').value = s.pageTranslationEngine
   el<HTMLInputElement>('autoPageTranslation').checked = s.autoPageTranslation
+  el<HTMLSelectElement>('pageTranslationDisplayMode').value = s.pageTranslationDisplayMode
+  renderSiteRules(s.siteRules)
+  void renderVocabulary()
   el<HTMLInputElement>('pageTranslationFontSizePx').value = String(
     s.pageTranslationFontSizePx,
   )
@@ -197,10 +222,13 @@ function readForm(stored: UserSettings): UserSettings {
     autoTranslate: el<HTMLInputElement>('autoTranslate').checked,
     selectionTranslate: el<HTMLInputElement>('selectionTranslate').checked,
     showFloatingBubble: el<HTMLInputElement>('showFloatingBubble').checked,
+    inputTranslate: el<HTMLInputElement>('inputTranslate').checked,
     translationEngine: el<HTMLSelectElement>('translationEngine').value as TranslationEngine,
     pageTranslationEngine: el<HTMLSelectElement>('pageTranslationEngine')
       .value as TranslationEngine,
     autoPageTranslation: el<HTMLInputElement>('autoPageTranslation').checked,
+    pageTranslationDisplayMode: el<HTMLSelectElement>('pageTranslationDisplayMode')
+      .value as UserSettings['pageTranslationDisplayMode'],
     pageTranslationFontSizePx: Number(
       el<HTMLInputElement>('pageTranslationFontSizePx').value,
     ),
@@ -270,6 +298,111 @@ async function runConnectionTest(settings: UserSettings): Promise<void> {
   }
 }
 
+function isListModelsResult(value: unknown): value is ListModelsResult {
+  if (!value || typeof value !== 'object') return false
+  const result = value as { type?: unknown; ok?: unknown; models?: unknown; error?: unknown }
+  if (result.type !== 'list-models-result') return false
+  return result.ok === true
+    ? Array.isArray(result.models)
+    : result.ok === false && typeof result.error === 'string'
+}
+
+/** Populate the model datalist from the provider's OpenAI-compatible /models catalog. */
+async function runFetchModels(settings: UserSettings): Promise<void> {
+  const button = el<HTMLButtonElement>('fetchModels')
+  button.disabled = true
+  setTestStatus('正在获取模型列表…', 'testing')
+  try {
+    const response: unknown = await chrome.runtime.sendMessage({
+      type: 'list-models',
+      baseURL: settings.baseURL,
+      apiKey: settings.apiKey,
+    })
+    if (isListModelsResult(response) && response.ok) {
+      const datalist = el<HTMLDataListElement>('modelOptions')
+      datalist.replaceChildren(
+        ...response.models.map((id) => {
+          const option = document.createElement('option')
+          option.value = id
+          return option
+        }),
+      )
+      setTestStatus(`已获取 ${response.models.length} 个可用模型，在模型输入框下拉选择`, 'ok')
+    } else {
+      const error = isListModelsResult(response) && !response.ok ? response.error : '未知错误'
+      setTestStatus(`获取模型列表失败：${error}`, 'error')
+    }
+  } catch (err) {
+    setTestStatus(`获取模型列表失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+  } finally {
+    button.disabled = false
+  }
+}
+
+function isCacheStatsResult(value: unknown): value is CacheStatsResult {
+  if (!value || typeof value !== 'object') return false
+  const result = value as {
+    type?: unknown
+    ok?: unknown
+    persistentEntries?: unknown
+    error?: unknown
+  }
+  if (result.type !== 'cache-stats-result') return false
+  return result.ok === true
+    ? typeof result.persistentEntries === 'number'
+    : result.ok === false && typeof result.error === 'string'
+}
+
+function formatCacheSize(chars: number): string {
+  if (chars >= 1_000_000) return `${(chars / 1_000_000).toFixed(1)} MB`
+  if (chars >= 10_000) return `${Math.round(chars / 1000)} KB`
+  return `${chars} B`
+}
+
+/** Populate the cache-management row with live sizes for both cache layers. */
+async function refreshCacheStats(): Promise<void> {
+  const node = el<HTMLElement>('cacheStatsText')
+  try {
+    const response: unknown = await chrome.runtime.sendMessage({ type: 'get-cache-stats' })
+    if (!isCacheStatsResult(response) || !response.ok) {
+      node.textContent = '无法读取缓存统计。'
+      return
+    }
+    node.textContent =
+      `长期缓存 ${response.persistentEntries} 条（约 ${formatCacheSize(response.persistentChars)}），` +
+      `跨页面复用相同句子；会话缓存 ${response.sessionEntries} 条。`
+  } catch {
+    node.textContent = '无法读取缓存统计。'
+  }
+}
+
+function isClearCacheResult(value: unknown): value is ClearTranslationCacheResult {
+  if (!value || typeof value !== 'object') return false
+  const result = value as { type?: unknown; ok?: unknown; error?: unknown }
+  if (result.type !== 'clear-translation-cache-result') return false
+  return result.ok === true || (result.ok === false && typeof result.error === 'string')
+}
+
+async function runClearCache(): Promise<void> {
+  if (!confirm('确定清空全部翻译缓存？已渲染的译文不受影响，下次翻译将重新请求。')) return
+  const button = el<HTMLButtonElement>('clearCache')
+  button.disabled = true
+  try {
+    const response: unknown = await chrome.runtime.sendMessage({ type: 'clear-translation-cache' })
+    if (isClearCacheResult(response) && response.ok) {
+      setStatus('翻译缓存已清空', true)
+    } else {
+      const error = isClearCacheResult(response) && !response.ok ? response.error : '未知错误'
+      setStatus(`清空缓存失败：${error}`, false)
+    }
+  } catch (err) {
+    setStatus(`清空缓存失败：${err instanceof Error ? err.message : String(err)}`, false)
+  } finally {
+    button.disabled = false
+    void refreshCacheStats()
+  }
+}
+
 function updateConfigBadge(s: UserSettings): void {
   const badge = el<HTMLElement>('configBadge')
   if (isConfigured(s)) {
@@ -290,11 +423,14 @@ function updateProviderHint(provider: string): void {
   } else if (provider === 'stepfun') {
     hint.textContent =
       'StepFun：默认 reasoning_effort=low（最低推理）。Base 常用 https://api.stepfun.com/v1 或 https://api.stepfun.ai/v1'
+  } else if (provider === 'alibaba') {
+    hint.textContent =
+      '阿里云百炼：默认 enable_thinking=false（关思考，Qwen3 混合思考模型）。Base 常用 https://dashscope.aliyuncs.com/compatible-mode/v1'
   } else if (provider === 'openai') {
     hint.textContent = '通用 OpenAI 兼容接口，不附加特殊思考参数。'
   } else {
     hint.textContent =
-      '自动识别 Base URL / 模型：DeepSeek 关 thinking；StepFun 用 reasoning_effort=low。'
+      '自动识别 Base URL / 模型：DeepSeek 关 thinking；StepFun 用 reasoning_effort=low；阿里云百炼用 enable_thinking=false。'
   }
 }
 
@@ -309,6 +445,145 @@ function updateEngineSummary(settings: UserSettings): void {
   const lens = settings.translationEngine === 'browser' ? 'Chrome' : '外部 LLM'
   const page = settings.pageTranslationEngine === 'browser' ? 'Chrome' : '外部 LLM'
   el<HTMLElement>('engineSummary').textContent = `透镜 ${lens} · 整页 ${page}`
+}
+
+// ---------------------------------------------------------------------------
+// Site rules
+// ---------------------------------------------------------------------------
+
+const AUTO_PAGE_LABELS = { 'force-on': '自动整页·总是', 'force-off': '自动整页·从不' } as const
+const ENGINE_LABELS = { browser: 'Chrome 内置', external: '外部 LLM' } as const
+
+function renderSiteRules(rules: Record<string, SiteRule>): void {
+  const list = el<HTMLElement>('siteRulesList')
+  const rows = Object.entries(rules).map(([host, rule]) => {
+    const item = document.createElement('div')
+    item.className = 'site-rule-item'
+    const hostEl = document.createElement('span')
+    hostEl.className = 'host'
+    hostEl.textContent = host
+    hostEl.title = host
+    const autoEl = document.createElement('span')
+    autoEl.textContent = rule.autoPage ? AUTO_PAGE_LABELS[rule.autoPage] : '自动整页·跟随全局'
+    const engineEl = document.createElement('span')
+    engineEl.textContent = rule.engine ? `引擎·${ENGINE_LABELS[rule.engine]}` : '引擎·跟随全局'
+    const removeBtn = document.createElement('button')
+    removeBtn.type = 'button'
+    removeBtn.className = 'button ghost'
+    removeBtn.textContent = '删除'
+    removeBtn.addEventListener('click', () => {
+      void removeSiteRule(host)
+    })
+    item.append(hostEl, autoEl, engineEl, removeBtn)
+    return item
+  })
+  list.replaceChildren(...rows)
+}
+
+async function persistSiteRules(rules: Record<string, SiteRule>): Promise<void> {
+  const stored = await loadSettings()
+  await saveSettings({ ...stored, siteRules: rules })
+  renderSiteRules(rules)
+  setStatus('站点规则已保存', true)
+}
+
+async function removeSiteRule(host: string): Promise<void> {
+  const stored = await loadSettings()
+  const rules = { ...stored.siteRules }
+  delete rules[host]
+  await persistSiteRules(rules)
+}
+
+async function addSiteRuleFromInputs(): Promise<void> {
+  const host = el<HTMLInputElement>('siteRuleHost').value.trim().toLowerCase()
+  if (!host || host.includes('/') || host.includes(' ')) {
+    setStatus('请输入纯主机名（如 example.com）', false)
+    return
+  }
+  const autoPage = el<HTMLSelectElement>('siteRuleAutoPage').value
+  const engine = el<HTMLSelectElement>('siteRuleEngine').value
+  const rule: SiteRule = {}
+  if (autoPage === 'force-on' || autoPage === 'force-off') rule.autoPage = autoPage
+  if (engine === 'browser' || engine === 'external') rule.engine = engine
+  if (!rule.autoPage && !rule.engine) {
+    setStatus('请至少选择一项规则（自动整页或引擎）', false)
+    return
+  }
+  const stored = await loadSettings()
+  await persistSiteRules({ ...stored.siteRules, [host]: rule })
+  el<HTMLInputElement>('siteRuleHost').value = ''
+  el<HTMLSelectElement>('siteRuleAutoPage').value = ''
+  el<HTMLSelectElement>('siteRuleEngine').value = ''
+}
+
+// ---------------------------------------------------------------------------
+// Vocabulary notebook
+// ---------------------------------------------------------------------------
+
+let vocabularyEntries: VocabularyEntry[] = []
+
+function renderVocabularyList(): void {
+  const query = el<HTMLInputElement>('vocabSearch').value.trim().toLowerCase()
+  const list = el<HTMLElement>('vocabList')
+  const filtered = query
+    ? vocabularyEntries.filter(
+        (entry) =>
+          entry.source.toLowerCase().includes(query) ||
+          entry.translation.toLowerCase().includes(query),
+      )
+    : vocabularyEntries
+
+  const rows = filtered.slice(0, 200).map((entry) => {
+    const item = document.createElement('div')
+    item.className = 'vocab-item'
+    const main = document.createElement('div')
+    const source = document.createElement('div')
+    source.className = 'source'
+    source.textContent = entry.source
+    const translation = document.createElement('div')
+    translation.className = 'translation'
+    translation.textContent = entry.translation
+    const meta = document.createElement('div')
+    meta.className = 'meta'
+    const link = document.createElement('a')
+    link.href = entry.pageUrl
+    link.target = '_blank'
+    link.rel = 'noreferrer'
+    link.textContent = '来源'
+    meta.append(
+      document.createTextNode(
+        `${entry.sourceLang}→${entry.targetLang} · ×${entry.count} · ${new Date(entry.lastSeenAt).toLocaleDateString()} · `,
+      ),
+      link,
+    )
+    main.append(source, translation, meta)
+    const removeBtn = document.createElement('button')
+    removeBtn.type = 'button'
+    removeBtn.className = 'button ghost'
+    removeBtn.textContent = '删除'
+    removeBtn.addEventListener('click', () => {
+      void removeVocabularyEntry(entry.id).then(renderVocabulary)
+    })
+    item.append(main, removeBtn)
+    return item
+  })
+  list.replaceChildren(...rows)
+  el<HTMLElement>('vocabCount').textContent =
+    `${vocabularyEntries.length} 条` + (filtered.length !== vocabularyEntries.length ? `（筛选出 ${filtered.length}）` : '')
+}
+
+async function renderVocabulary(): Promise<void> {
+  vocabularyEntries = await loadVocabulary()
+  renderVocabularyList()
+}
+
+function downloadTextFile(filename: string, text: string, mime: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type: mime }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 function browserVersion(): string {
@@ -335,10 +610,13 @@ function renderBrowserCapability(
       '点击下载并测试；完成后即可用内置引擎翻译所选语言对。',
     ],
     downloading: ['语言包正在下载', detail || '请保持此页面打开。'],
-    unavailable: ['当前语言对不可用', '可更换语言代码，或将对应翻译引擎切换为外部 LLM。'],
+    unavailable: [
+      '当前暂时无法使用内置翻译',
+      '可能是语言包未就绪、页面策略限制，或扩展翻译宿主未启动。可点「重新检测」，或改用外部 LLM。',
+    ],
     unsupported: [
       '当前环境未提供 Translator API',
-      `检测到 Chrome/Chromium ${browserVersion()}。该能力要求桌面版 Chrome 138+，其他 Chromium 浏览器不保证支持。`,
+      `检测到 Chrome/Chromium ${browserVersion()}。该能力要求桌面版 Chrome 138+；若你以前能用，请点重新检测或重启 Chrome 后再试。`,
     ],
     error: ['检测失败', detail || '请重新检测；持续失败时可改用外部 LLM。'],
   } as const
@@ -350,7 +628,9 @@ function renderBrowserCapability(
 
 async function checkBrowserCapability(prepare = false): Promise<void> {
   const request = ++capabilityRequest
-  const source = el<HTMLSelectElement>('sourceLang').value || DEFAULT_SETTINGS.sourceLang
+  // 'auto' is a runtime resolution — probe the capability with English instead.
+  const rawSource = el<HTMLSelectElement>('sourceLang').value || DEFAULT_SETTINGS.sourceLang
+  const source = rawSource === 'auto' ? 'en' : rawSource
   const target = el<HTMLSelectElement>('targetLang').value || DEFAULT_SETTINGS.targetLang
   renderBrowserCapability('checking')
   try {
@@ -363,7 +643,17 @@ async function checkBrowserCapability(prepare = false): Promise<void> {
         renderBrowserCapability('downloading', `语言包下载进度 ${Math.round(progress * 100)}%`)
       })
       if (request !== capabilityRequest) return
-      browserCapability = ready ? 'available' : 'unavailable'
+      if (ready) {
+        browserCapability = 'available'
+      } else {
+        browserCapability = 'unavailable'
+        renderBrowserCapability(
+          'error',
+          browserTranslator.lastError?.trim() ||
+            '语言包下载失败。请检查网络（需能访问 Google 模型服务）后重试。',
+        )
+        return
+      }
     }
     renderBrowserCapability(browserCapability)
   } catch (error) {
@@ -378,10 +668,10 @@ function applyProviderPreset(id: string): void {
   const base = el<HTMLInputElement>('baseURL')
   const model = el<HTMLInputElement>('model')
   // Only fill empty or previous default-looking fields
-  if (!base.value.trim() || /openai\.com|deepseek\.com|stepfun\./i.test(base.value)) {
+  if (!base.value.trim() || /openai\.com|deepseek\.com|stepfun\.|dashscope|aliyuncs/i.test(base.value)) {
     base.value = preset.baseURL
   }
-  if (!model.value.trim() || /gpt-4o-mini|deepseek|step-/i.test(model.value)) {
+  if (!model.value.trim() || /gpt-4o-mini|deepseek|step-|qwen/i.test(model.value)) {
     model.value = preset.modelHint
   }
 }
@@ -506,22 +796,40 @@ function renderOnboardingStep(): void {
 }
 
 async function refreshOnboardBrowserStatus(): Promise<void> {
-  const source = el<HTMLSelectElement>('onboardSource').value || DEFAULT_SETTINGS.sourceLang
+  const rawSource = el<HTMLSelectElement>('onboardSource').value || DEFAULT_SETTINGS.sourceLang
   const target = el<HTMLSelectElement>('onboardTarget').value || DEFAULT_SETTINGS.targetLang
   const status = el<HTMLElement>('onboardBrowserStatus')
-  const pair = languagePairLabel(source, target)
-  if (!browserTranslator.isSupported()) {
-    status.textContent = `当前环境无 Translator API。可跳过并用外部 LLM（${pair}）。`
-    return
+  // 'auto' resolves per page at runtime; probe the pack with English as baseline.
+  const source = rawSource === 'auto' ? 'en' : rawSource
+  const pair =
+    rawSource === 'auto'
+      ? `自动检测 → ${languageName(target)}`
+      : languagePairLabel(source, target)
+  try {
+    if (!browserTranslator.isSupported()) {
+      status.textContent = `当前环境无 Translator API。可跳过并用外部 LLM（${pair}）。`
+      return
+    }
+    const availability = await browserTranslator.availability(source, target)
+    if (availability === 'available') {
+      status.textContent = `${pair} 语言包已就绪。`
+    } else if (availability === 'downloadable' || availability === 'downloading') {
+      status.textContent = `${pair} 需要下载语言包，可点下方按钮。`
+    } else if (availability === 'unsupported') {
+      status.textContent = `当前浏览器未提供内置翻译（需 Chrome 138+）。可跳过并用外部 LLM。`
+    } else {
+      status.textContent = `${pair} 暂时不可用：可重试下载，或改用外部 LLM。`
+    }
+  } catch (error) {
+    status.textContent = `检测失败：${error instanceof Error ? error.message : String(error)}`
   }
-  const availability = await browserTranslator.availability(source, target)
-  if (availability === 'available') {
-    status.textContent = `${pair} 语言包已就绪。`
-  } else if (availability === 'downloadable' || availability === 'downloading') {
-    status.textContent = `${pair} 需要下载语言包，可点下方按钮。`
-  } else {
-    status.textContent = `${pair} 在 Chrome 内置翻译中不可用，请更换语言或使用外部 LLM。`
-  }
+}
+
+/** Fire-and-forget async work must never become chrome://extensions errors. */
+function runSafe(task: () => Promise<void>, label: string): void {
+  void task().catch((error: unknown) => {
+    console.error(`[Lens Translator options] ${label}`, error)
+  })
 }
 
 async function completeOnboarding(stored: UserSettings, partial?: Partial<UserSettings>): Promise<UserSettings> {
@@ -538,7 +846,11 @@ async function completeOnboarding(stored: UserSettings, partial?: Partial<UserSe
 function setupOnboarding(getStored: () => UserSettings, setStored: (s: UserSettings) => void): void {
   const sourceSelect = el<HTMLSelectElement>('onboardSource')
   const targetSelect = el<HTMLSelectElement>('onboardTarget')
+  const autoOption = document.createElement('option')
+  autoOption.value = 'auto'
+  autoOption.textContent = '自动检测（推荐）'
   sourceSelect.replaceChildren(
+    autoOption,
     ...LANGUAGE_OPTIONS.map(([code, name]) => {
       const option = document.createElement('option')
       option.value = code
@@ -568,29 +880,42 @@ function setupOnboarding(getStored: () => UserSettings, setStored: (s: UserSetti
       <li><strong>划词翻译</strong>：选中文本即出译文（默认开启）</li>
       <li>右键扩展图标可打开快捷控制面板与完整设置</li>
     `
-    void refreshOnboardBrowserStatus()
+    runSafe(refreshOnboardBrowserStatus, 'onboard status')
   }
 
-  sourceSelect.addEventListener('change', () => void refreshOnboardBrowserStatus())
-  targetSelect.addEventListener('change', () => void refreshOnboardBrowserStatus())
+  sourceSelect.addEventListener('change', () =>
+    runSafe(refreshOnboardBrowserStatus, 'onboard source change'),
+  )
+  targetSelect.addEventListener('change', () =>
+    runSafe(refreshOnboardBrowserStatus, 'onboard target change'),
+  )
 
-  el<HTMLButtonElement>('onboardDownloadPack').addEventListener('click', async () => {
-    const source = sourceSelect.value
-    const target = targetSelect.value
-    const status = el<HTMLElement>('onboardBrowserStatus')
-    status.textContent = '正在下载语言包…'
-    const ready = await browserTranslator.prepare(source, target, (p) => {
-      status.textContent = `语言包下载 ${Math.round(p * 100)}%`
-    })
-    status.textContent = ready
-      ? `${languagePairLabel(source, target)} 已就绪。`
-      : '下载失败，请检查网络或改用外部 LLM。'
-    void checkBrowserCapability()
+  el<HTMLButtonElement>('onboardDownloadPack').addEventListener('click', () => {
+    runSafe(async () => {
+      const source = sourceSelect.value
+      const target = targetSelect.value
+      const status = el<HTMLElement>('onboardBrowserStatus')
+      status.textContent = '正在下载语言包…'
+      const ready = await browserTranslator.prepare(source, target, (p) => {
+        status.textContent = `语言包下载 ${Math.round(p * 100)}%`
+      })
+      if (ready) {
+        status.textContent = `${languagePairLabel(source, target)} 已就绪。`
+      } else {
+        const detail = browserTranslator.lastError?.trim()
+        status.textContent = detail
+          ? `下载失败：${detail}`
+          : '下载失败。请确认桌面版 Chrome 138+、可访问 Google 模型下载，或改用外部 LLM。'
+      }
+      await checkBrowserCapability()
+    }, 'onboard download pack')
   })
 
-  el<HTMLButtonElement>('onboardSkip').addEventListener('click', async () => {
-    setStored(await completeOnboarding(getStored()))
-    fillForm(getStored())
+  el<HTMLButtonElement>('onboardSkip').addEventListener('click', () => {
+    runSafe(async () => {
+      setStored(await completeOnboarding(getStored()))
+      fillForm(getStored())
+    }, 'onboard skip')
   })
 
   el<HTMLButtonElement>('onboardBack').addEventListener('click', () => {
@@ -598,43 +923,45 @@ function setupOnboarding(getStored: () => UserSettings, setStored: (s: UserSetti
     renderOnboardingStep()
   })
 
-  el<HTMLButtonElement>('onboardNext').addEventListener('click', async () => {
-    if (onboardingStep === 1) {
-      const next = {
-        ...getStored(),
-        sourceLang: sourceSelect.value || DEFAULT_SETTINGS.sourceLang,
-        targetLang: targetSelect.value || DEFAULT_SETTINGS.targetLang,
-      }
-      await saveSettings(next)
-      setStored(await loadSettings())
-      fillForm(getStored())
-      onboardingStep = 2
-      renderOnboardingStep()
-      return
-    }
-    if (onboardingStep === 2) {
-      const baseURL = el<HTMLInputElement>('onboardBaseURL').value.trim()
-      const apiKey = el<HTMLInputElement>('onboardApiKey').value.trim()
-      const model = el<HTMLInputElement>('onboardModel').value.trim()
-      if (baseURL || apiKey || model) {
+  el<HTMLButtonElement>('onboardNext').addEventListener('click', () => {
+    runSafe(async () => {
+      if (onboardingStep === 1) {
         const next = {
           ...getStored(),
-          baseURL: baseURL || getStored().baseURL,
-          apiKey: apiKey || getStored().apiKey,
-          model: model || getStored().model,
+          sourceLang: sourceSelect.value || DEFAULT_SETTINGS.sourceLang,
+          targetLang: targetSelect.value || DEFAULT_SETTINGS.targetLang,
         }
         await saveSettings(next)
         setStored(await loadSettings())
         fillForm(getStored())
+        onboardingStep = 2
+        renderOnboardingStep()
+        return
       }
-      onboardingStep = 3
-      syncFromStored()
-      renderOnboardingStep()
-      return
-    }
-    setStored(await completeOnboarding(getStored()))
-    fillForm(getStored())
-    setStatus('向导完成 · 点击扩展图标即可开始翻译', true)
+      if (onboardingStep === 2) {
+        const baseURL = el<HTMLInputElement>('onboardBaseURL').value.trim()
+        const apiKey = el<HTMLInputElement>('onboardApiKey').value.trim()
+        const model = el<HTMLInputElement>('onboardModel').value.trim()
+        if (baseURL || apiKey || model) {
+          const next = {
+            ...getStored(),
+            baseURL: baseURL || getStored().baseURL,
+            apiKey: apiKey || getStored().apiKey,
+            model: model || getStored().model,
+          }
+          await saveSettings(next)
+          setStored(await loadSettings())
+          fillForm(getStored())
+        }
+        onboardingStep = 3
+        syncFromStored()
+        renderOnboardingStep()
+        return
+      }
+      setStored(await completeOnboarding(getStored()))
+      fillForm(getStored())
+      setStatus('向导完成 · 点击扩展图标即可开始翻译', true)
+    }, 'onboard next')
   })
 
   syncFromStored()
@@ -645,7 +972,7 @@ async function init(): Promise<void> {
   populateLanguageSelects()
   let stored = await loadSettings()
   fillForm(stored)
-  void checkBrowserCapability()
+  runSafe(() => checkBrowserCapability(), 'initial capability check')
   setupSectionNavigation()
   setupHotkeyCapture('hotkey', 'captureHotkey', 'captureHint')
   setupHotkeyCapture('pageHotkey', 'capturePageHotkey', 'capturePageHint')
@@ -661,7 +988,13 @@ async function init(): Promise<void> {
     new URLSearchParams(location.search).get('onboarding') === '1'
   if (!stored.onboardingCompleted || forceOnboarding) {
     showOnboarding(true)
-    if (forceOnboarding) history.replaceState(null, '', location.pathname)
+    if (forceOnboarding) {
+      try {
+        history.replaceState(null, '', `${location.pathname}${location.search}`)
+      } catch {
+        // ignore history errors on restricted extension URLs
+      }
+    }
   }
 
   el<HTMLInputElement>('pageTranslationUseCustomColor').addEventListener(
@@ -673,12 +1006,18 @@ async function init(): Promise<void> {
     updateStyleControlStates,
   )
   el<HTMLButtonElement>('browserCapabilityAction').addEventListener('click', () => {
-    void checkBrowserCapability(
-      browserCapability === 'downloadable' || browserCapability === 'downloading',
+    runSafe(
+      () =>
+        checkBrowserCapability(
+          browserCapability === 'downloadable' || browserCapability === 'downloading',
+        ),
+      'capability action',
     )
   })
   for (const id of ['sourceLang', 'targetLang']) {
-    el<HTMLSelectElement>(id).addEventListener('change', () => void checkBrowserCapability())
+    el<HTMLSelectElement>(id).addEventListener('change', () =>
+      runSafe(() => checkBrowserCapability(), 'language change'),
+    )
   }
   for (const id of ['translationEngine', 'pageTranslationEngine']) {
     el<HTMLSelectElement>(id).addEventListener('change', () => {
@@ -692,60 +1031,110 @@ async function init(): Promise<void> {
     if (v !== 'auto') applyProviderPreset(v)
   })
 
-  el<HTMLFormElement>('settings-form').addEventListener('submit', async (e) => {
+  el<HTMLFormElement>('settings-form').addEventListener('submit', (e) => {
     e.preventDefault()
-    try {
-      const next = readForm(stored)
-      if (hotkeysEqual(next.hotkey, next.pageTranslationHotkey)) {
-        setStatus('翻译透镜与整页翻译不能使用同一个快捷键', false)
-        return
-      }
-      const usesExternal =
-        next.translationEngine === 'external' || next.pageTranslationEngine === 'external'
-      const missing = usesExternal ? missingConfigFields(next) : []
-      if (missing.length) {
+    runSafe(async () => {
+      try {
+        const next = readForm(stored)
+        if (hotkeysEqual(next.hotkey, next.pageTranslationHotkey)) {
+          setStatus('翻译透镜与整页翻译不能使用同一个快捷键', false)
+          return
+        }
+        const usesExternal =
+          next.translationEngine === 'external' || next.pageTranslationEngine === 'external'
+        const missing = usesExternal ? missingConfigFields(next) : []
+        if (missing.length) {
+          await saveSettings({ ...next, onboardingCompleted: true })
+          stored = await loadSettings()
+          fillForm(stored)
+          setStatus(`已保存，但尚未完成配置：请填写 ${missing.join('、')}`, false)
+          return
+        }
         await saveSettings({ ...next, onboardingCompleted: true })
         stored = await loadSettings()
         fillForm(stored)
-        setStatus(`已保存，但尚未完成配置：请填写 ${missing.join('、')}`, false)
-        return
+        const usesBrowser =
+          stored.translationEngine === 'browser' || stored.pageTranslationEngine === 'browser'
+        if (
+          usesBrowser &&
+          (browserCapability === 'unsupported' || browserCapability === 'unavailable')
+        ) {
+          setStatus('已保存，但当前 Chrome 内置翻译不可用；请查看能力诊断或改用外部 LLM。', false)
+        } else if (
+          usesBrowser &&
+          (browserCapability === 'downloadable' || browserCapability === 'downloading')
+        ) {
+          setStatus('已保存 · 使用内置翻译前，请先在 Chrome 能力区下载语言包。', false)
+        } else if (isConfigured(stored)) {
+          setStatus('已保存 · 已同步到打开的网页。', true)
+        } else if (!usesExternal) {
+          setStatus('已保存 · Chrome 内置翻译模式已启用。', true)
+        } else {
+          setStatus('保存后校验失败，请重新填写 API Key 并保存。', false)
+        }
+      } catch (err) {
+        setStatus(err instanceof Error ? err.message : String(err), false)
       }
-      await saveSettings({ ...next, onboardingCompleted: true })
-      stored = await loadSettings()
-      fillForm(stored)
-      const usesBrowser =
-        stored.translationEngine === 'browser' || stored.pageTranslationEngine === 'browser'
-      if (usesBrowser && (browserCapability === 'unsupported' || browserCapability === 'unavailable')) {
-        setStatus('已保存，但当前 Chrome 内置翻译不可用；请查看能力诊断或改用外部 LLM。', false)
-      } else if (
-        usesBrowser &&
-        (browserCapability === 'downloadable' || browserCapability === 'downloading')
-      ) {
-        setStatus('已保存 · 使用内置翻译前，请先在 Chrome 能力区下载语言包。', false)
-      } else if (isConfigured(stored)) {
-        setStatus('已保存 · 已同步到打开的网页。', true)
-      } else if (!usesExternal) {
-        setStatus('已保存 · Chrome 内置翻译模式已启用。', true)
-      } else {
-        setStatus('保存后校验失败，请重新填写 API Key 并保存。', false)
-      }
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err), false)
-    }
+    }, 'save settings')
   })
 
   el<HTMLButtonElement>('testConnection').addEventListener('click', () => {
-    void runConnectionTest(readForm(stored))
+    runSafe(() => runConnectionTest(readForm(stored)), 'test connection')
   })
   el<HTMLButtonElement>('testVision').addEventListener('click', () => {
-    void runVisionTest(readForm(stored))
+    runSafe(() => runVisionTest(readForm(stored)), 'test vision')
+  })
+  el<HTMLButtonElement>('fetchModels').addEventListener('click', () => {
+    runSafe(() => runFetchModels(readForm(stored)), 'fetch models')
+  })
+  el<HTMLButtonElement>('clearCache').addEventListener('click', () => {
+    runSafe(runClearCache, 'clear cache')
+  })
+  void refreshCacheStats()
+
+  el<HTMLButtonElement>('reset').addEventListener('click', () => {
+    runSafe(async () => {
+      if (!confirm('确定恢复默认？API Key 会被清空。')) return
+      await saveSettings({ ...DEFAULT_SETTINGS, onboardingCompleted: true })
+      location.reload()
+    }, 'reset settings')
   })
 
-  el<HTMLButtonElement>('reset').addEventListener('click', async () => {
-    if (!confirm('确定恢复默认？API Key 会被清空。')) return
-    await saveSettings({ ...DEFAULT_SETTINGS, onboardingCompleted: true })
-    location.reload()
+  el<HTMLButtonElement>('siteRuleAdd').addEventListener('click', () => {
+    runSafe(addSiteRuleFromInputs, 'add site rule')
+  })
+
+  el<HTMLInputElement>('vocabSearch').addEventListener('input', renderVocabularyList)
+  el<HTMLButtonElement>('vocabExportCsv').addEventListener('click', () => {
+    if (vocabularyEntries.length) {
+      downloadTextFile('lens-vocabulary.csv', vocabularyToCsv(vocabularyEntries), 'text/csv;charset=utf-8')
+    }
+  })
+  el<HTMLButtonElement>('vocabExportAnki').addEventListener('click', () => {
+    if (vocabularyEntries.length) {
+      downloadTextFile(
+        'lens-vocabulary.tsv',
+        vocabularyToAnkiTsv(vocabularyEntries),
+        'text/tab-separated-values;charset=utf-8',
+      )
+    }
+  })
+  el<HTMLButtonElement>('vocabClear').addEventListener('click', () => {
+    runSafe(async () => {
+      if (!confirm('确定清空生词本？此操作不可撤销。')) return
+      await clearVocabulary()
+      await renderVocabulary()
+    }, 'clear vocabulary')
   })
 }
 
-void init()
+// Prevent transient messaging / Translator quirks from spamming chrome://extensions.
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('[Lens Translator options] unhandledrejection', event.reason)
+  event.preventDefault()
+})
+window.addEventListener('error', (event) => {
+  console.error('[Lens Translator options] error', event.error ?? event.message)
+})
+
+runSafe(init, 'init')

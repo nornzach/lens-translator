@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Lens Translator Host</title>
+  </head>
+  <body>
+    <!--
+      Top-level extension page that hosts Chrome Translator API.
+      Opened as a tiny unfocused (then minimized) popup by the service worker —
+      not chrome.offscreen (offscreen throws "The on-device translation is not
+      available"). Closes itself via the service worker after an idle stretch.
+    -->
+    <!-- Shown only if the user restores the minimized window by hand. -->
+    <p style="font: 12px/1.5 system-ui, sans-serif; color: #64748b; margin: 12px">
+      Lens Translator 内置翻译宿主窗口。闲置时会自动关闭，直接关掉它也不影响使用。
+    </p>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

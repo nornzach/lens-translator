@@ -150,6 +150,18 @@
 
             <div class="setting-row">
               <div class="setting-copy">
+                <h3>输入框回译</h3>
+                <p>透镜指向输入框 / 文本域时显示回译，可一键替换为译文（可 Ctrl+Z 撤销）。</p>
+              </div>
+              <label class="switch-control">
+                <input id="inputTranslate" name="inputTranslate" type="checkbox" />
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-label">启用</span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
                 <h3>自动预译可见区</h3>
                 <p>滚动或页面更新时预先翻译透镜可能指向的文本。外部模式会主动发送文本。</p>
               </div>
@@ -236,6 +248,20 @@
                 <span class="switch-track" aria-hidden="true"></span>
                 <span class="switch-label">启用</span>
               </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>显示模式</h3>
+                <p>双语对照保留原文；仅译文收起原文；学习模式先读原文，悬停才显示译文。</p>
+              </div>
+              <div class="control">
+                <select id="pageTranslationDisplayMode" name="pageTranslationDisplayMode">
+                  <option value="bilingual">双语对照</option>
+                  <option value="translation-only">仅译文</option>
+                  <option value="learning">学习模式（悬停显示）</option>
+                </select>
+              </div>
             </div>
 
             <div class="setting-row appearance-row">
@@ -372,6 +398,7 @@
                   <option value="openai">OpenAI / 通用兼容</option>
                   <option value="deepseek">DeepSeek</option>
                   <option value="stepfun">StepFun 阶跃星辰</option>
+                  <option value="alibaba">阿里云百炼 (Qwen)</option>
                 </select>
               </div>
             </div>
@@ -395,7 +422,18 @@
                 </label>
                 <label>
                   <span>模型</span>
-                  <input id="model" name="model" type="text" placeholder="gpt-4o-mini" spellcheck="false" />
+                  <span class="model-field">
+                    <input
+                      id="model"
+                      name="model"
+                      type="text"
+                      placeholder="gpt-4o-mini"
+                      spellcheck="false"
+                      list="modelOptions"
+                    />
+                    <button type="button" id="fetchModels" class="button secondary">获取</button>
+                  </span>
+                  <datalist id="modelOptions"></datalist>
                 </label>
               </div>
             </div>
@@ -442,6 +480,16 @@
                 <span id="testConnectionStatus" class="test-connection-status" role="status" aria-live="polite"></span>
               </div>
             </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>翻译缓存</h3>
+                <p id="cacheStatsText">长期缓存 LLM 文本翻译结果，跨页面、跨标签页复用相同句子。</p>
+              </div>
+              <div class="control test-connection-control">
+                <button type="button" id="clearCache" class="button secondary">清空缓存</button>
+              </div>
+            </div>
           </section>
 
           <section id="site-rules" class="settings-section">
@@ -463,6 +511,52 @@
                   type="text"
                   placeholder="example.com, news.ycombinator.com"
                 />
+              </div>
+            </div>
+            <div class="setting-row rules-row">
+              <div class="setting-copy">
+                <h3>站点规则</h3>
+                <p>按站点强制自动整页翻译，或覆盖翻译引擎。规则优先于全局设置。</p>
+              </div>
+              <div class="control site-rules-control">
+                <div id="siteRulesList" class="site-rules-list"></div>
+                <div class="site-rules-add">
+                  <input id="siteRuleHost" type="text" placeholder="example.com" />
+                  <select id="siteRuleAutoPage">
+                    <option value="">自动整页·跟随全局</option>
+                    <option value="force-on">自动整页·总是</option>
+                    <option value="force-off">自动整页·从不</option>
+                  </select>
+                  <select id="siteRuleEngine">
+                    <option value="">引擎·跟随全局</option>
+                    <option value="browser">引擎·Chrome 内置</option>
+                    <option value="external">引擎·外部 LLM</option>
+                  </select>
+                  <button type="button" id="siteRuleAdd" class="button secondary">添加</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="vocabulary" class="settings-section">
+            <header class="section-heading section-heading-with-status">
+              <div>
+                <h2>生词本</h2>
+                <p>透镜与划词面板中点 ☆ 收藏的句子。重复收藏会计数，可作为复习信号。</p>
+              </div>
+              <div class="action-buttons">
+                <button type="button" id="vocabExportCsv" class="button secondary">导出 CSV</button>
+                <button type="button" id="vocabExportAnki" class="button secondary">导出 Anki</button>
+              </div>
+            </header>
+            <div class="setting-row">
+              <div class="control vocab-control">
+                <input id="vocabSearch" type="search" placeholder="搜索原文或译文…" />
+                <div id="vocabList" class="vocab-list"></div>
+                <div class="vocab-footer">
+                  <span id="vocabCount">0 条</span>
+                  <button type="button" id="vocabClear" class="button ghost">清空</button>
+                </div>
               </div>
             </div>
           </section>

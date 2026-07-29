@@ -5,7 +5,7 @@ export default defineManifest({
   name: 'Lens Translator',
   description:
     'On-demand translation lens, selection popup, and bilingual page mode — Chrome built-in or your LLM.',
-  version: '0.4.0',
+  version: '0.5.0',
   action: {
     // No default_popup: click toggles sticky lens. Right-click for panel/settings.
     default_title: 'Lens Translator — 点击开关透镜',
@@ -26,7 +26,10 @@ export default defineManifest({
       run_at: 'document_idle',
     },
   ],
-  permissions: ['storage', 'tabs', 'scripting', 'contextMenus', 'notifications'],
+  // windows: required for the tiny Translator host popup used when page-local
+  // Translator is blocked (Gmail Permissions-Policy, etc.).
+  // tts: read source/translation aloud from the lens & selection panels.
+  permissions: ['storage', 'tabs', 'scripting', 'contextMenus', 'notifications', 'windows', 'tts'],
   host_permissions: ['http://*/*', 'https://*/*'],
   web_accessible_resources: [
     {

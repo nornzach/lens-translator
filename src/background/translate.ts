@@ -1,17 +1,22 @@
 import { splitIntoBatches } from '../shared/batch'
 import {
+  buildDictionaryPrompt,
   buildTranslateImagePrompt,
   buildTranslateUserPrompt,
+  DICTIONARY_JSON_SCHEMA,
   IMAGE_TRANSLATION_JSON_SCHEMA,
+  parseDictionaryResult,
   parseImageTranslationResult,
   parseTranslateBatchResult,
+  type DictionaryEntry,
 } from '../shared/schema'
 import type { TranslateBlock } from '../shared/messages'
 import type { UserSettings } from '../shared/settings-defaults'
 import { makeTranslationCacheKey } from '../shared/text-hash'
 import { TranslationCache } from '../shared/translation-cache'
 import { normalizeText } from '../shared/text'
-import { chatCompletionsJson } from './openai'
+import { chatCompletionsJson, listModels } from './openai'
+import { sharedPersistentCache } from './persistent-cache'
 import type { ChatJsonParams } from './openai'
 
 const SYSTEM = 'You are a precise translation engine. Output JSON only.'
@@ -89,7 +94,11 @@ export async function translateBlocksSingleFlight(
   targetLang: string,
   blocks: TranslateBlock[],
   settings: UserSettings,
+  opts?: { forceRefresh?: boolean },
 ): Promise<TranslateAllResult> {
+  // Force-refresh requests deliberately bypass (and then overwrite) shared
+  // state, so they never join an in-flight coalesced request.
+  const coalesce = opts?.forceRefresh !== true
   const waiting: Array<{ block: TranslateBlock; outcome: Promise<SharedTranslationOutcome> }> = []
   const owned: Array<{
     block: TranslateBlock
@@ -100,7 +109,7 @@ export async function translateBlocksSingleFlight(
 
   for (const block of blocks) {
     const key = makeTranslationCacheKey(pageKey, sourceLang, targetLang, block.text)
-    const existing = inFlightTranslations.get(key)
+    const existing = coalesce ? inFlightTranslations.get(key) : undefined
     if (existing) {
       waiting.push({ block, outcome: existing })
       continue
@@ -109,7 +118,7 @@ export async function translateBlocksSingleFlight(
     const promise = new Promise<SharedTranslationOutcome>((done) => {
       resolve = done
     })
-    inFlightTranslations.set(key, promise)
+    if (coalesce) inFlightTranslations.set(key, promise)
     owned.push({ block, key, promise, resolve })
     waiting.push({ block, outcome: promise })
   }
@@ -358,6 +367,13 @@ async function loadImageDataUrl(
   return { ok: true, dataUrl: `data:${mimeType};base64,${btoa(binary)}` }
 }
 
+// Retry budgets per batch: 429s get extra attempts because per-line parallel
+// requests routinely trip provider rate limits and a Retry-After cooldown is
+// usually short; 5xx/network blips fail faster.
+const MAX_ATTEMPTS = 3
+const MAX_ATTEMPTS_RATE_LIMITED = 5
+const RETRY_BASE_DELAY_MS = 500
+
 /** Translate batches with bounded retries and preserve partial successes. */
 export async function translateAllBlocks(
   blocks: TranslateBlock[],
@@ -369,6 +385,7 @@ export async function translateAllBlocks(
   const batches = splitIntoBatches(blocks, settings.batchCharLimit, 40)
   const translations: { id: string; translation: string }[] = []
   const failedIds: string[] = []
+  let firstBatchError: string | null = null
 
   for (const batch of batches) {
     const allowed = new Set(batch.map((b) => b.id))
@@ -376,7 +393,7 @@ export async function translateAllBlocks(
     let batchOk = false
     let lastError = 'unknown'
 
-    while (attempt < 3 && !batchOk) {
+    while (!batchOk) {
       attempt++
       const userPrompt = buildTranslateUserPrompt(
         settings.sourceLang,
@@ -417,16 +434,16 @@ export async function translateAllBlocks(
             failedIds: blocks.map((b) => b.id),
           }
         }
-        if (
+        const retryLimit = result.status === 429 ? MAX_ATTEMPTS_RATE_LIMITED : MAX_ATTEMPTS
+        const retryable =
           result.status === 429 ||
           (result.status !== undefined && result.status >= 500) ||
           result.status === undefined
-        ) {
-          if (attempt < 3) {
-            // Silent exponential backoff for rate limits / upstream hiccups: 500ms, 1000ms.
-            await sleep(500 * 2 ** (attempt - 1))
-            continue
-          }
+        if (retryable && attempt < retryLimit) {
+          // Exponential backoff (500ms, 1s, 2s, 4s); a server-advertised
+          // Retry-After cooldown wins when it asks for longer.
+          await sleep(Math.max(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), result.retryAfterMs ?? 0))
+          continue
         }
         break
       }
@@ -436,15 +453,18 @@ export async function translateAllBlocks(
         parsedJson = JSON.parse(result.content)
       } catch {
         lastError = 'invalid JSON from model'
+        if (attempt >= MAX_ATTEMPTS) break
         continue
       }
       const parsed = parseTranslateBatchResult(parsedJson, allowed)
       if (!parsed.ok) {
         lastError = parsed.error
+        if (attempt >= MAX_ATTEMPTS) break
         continue
       }
       if (parsed.items.length === 0 && batch.length > 0) {
         lastError = 'empty translation items'
+        if (attempt >= MAX_ATTEMPTS) break
         continue
       }
       translations.push(...parsed.items)
@@ -456,14 +476,183 @@ export async function translateAllBlocks(
     }
 
     if (!batchOk) {
+      // One bad batch (oversized, garbled, transient 5xx) must not sink the
+      // rest of the run — record it and keep translating later batches.
+      if (firstBatchError === null) firstBatchError = lastError
       for (const b of batch) failedIds.push(b.id)
-      return { ok: false, error: lastError, translations, failedIds: [...new Set(failedIds)] }
     }
   }
 
   return failedIds.length
-    ? { ok: false, error: 'partial failure', translations, failedIds: [...new Set(failedIds)] }
+    ? {
+        ok: false,
+        error: firstBatchError ?? 'partial failure',
+        translations,
+        failedIds: [...new Set(failedIds)],
+      }
     : { ok: true, translations }
+}
+
+export type TranslateBatchCacheParams = {
+  pageKey: string
+  sourceLang: string
+  targetLang: string
+  blocks: TranslateBlock[]
+  settings: UserSettings
+  /** Skip every cache read; fresh results still overwrite both cache layers. */
+  forceRefresh?: boolean
+  /** L2 override for tests; defaults to the shared IndexedDB-backed cache. */
+  persistent?: Pick<typeof sharedPersistentCache, 'getMany' | 'setMany'>
+}
+
+/**
+ * Translate-block pipeline with two cache layers:
+ * L1 session cache (pageKey-scoped, fast) → L2 persistent cache (global text
+ * keys, LLM results, survives restarts) → upstream API. Fresh API results are
+ * written through to both layers.
+ */
+export async function translateBatchWithCaches(
+  params: TranslateBatchCacheParams,
+): Promise<TranslateAllResult> {
+  const { pageKey, sourceLang, targetLang, blocks, settings } = params
+  const forceRefresh = params.forceRefresh === true
+  const persistent = params.persistent ?? sharedPersistentCache
+
+  const { cached, missing, textHashToIds, idToText } = filterUncachedByText(
+    pageKey,
+    sourceLang,
+    targetLang,
+    blocks,
+    { skipCache: forceRefresh },
+  )
+
+  // L2: identical text translated anywhere before (menus, docs, fixed phrases).
+  // The cache is fail-open: a broken IndexedDB (quota, corruption, privacy
+  // modes) must degrade to plain API translation, never fail the request.
+  let l2Expanded: { id: string; translation: string }[] = []
+  let apiMissing = missing
+  if (!forceRefresh && missing.length) {
+    const keys = missing.map((rep) => makeTranslationCacheKey('', sourceLang, targetLang, rep.text))
+    let hits: Map<string, string> = new Map()
+    try {
+      hits = await persistent.getMany(keys)
+    } catch {
+      // Cache read failure = cold cache.
+    }
+    if (hits.size) {
+      const repResults: { id: string; translation: string }[] = []
+      const hitIds = new Set<string>()
+      missing.forEach((rep, index) => {
+        const translation = hits.get(keys[index])
+        if (translation === undefined) return
+        repResults.push({ id: rep.id, translation })
+        hitIds.add(rep.id)
+      })
+      // Seed L1 and expand each hit to every id sharing the text.
+      l2Expanded = expandTranslationsToAllIds(
+        pageKey,
+        sourceLang,
+        targetLang,
+        repResults,
+        idToText,
+        textHashToIds,
+      )
+      apiMissing = missing.filter((rep) => !hitIds.has(rep.id))
+    }
+  }
+
+  let apiExpanded: { id: string; translation: string }[] = []
+  let apiResult: TranslateAllResult = { ok: true, translations: [] }
+  if (apiMissing.length) {
+    apiResult = await translateBlocksSingleFlight(
+      pageKey,
+      sourceLang,
+      targetLang,
+      apiMissing,
+      settings,
+      { forceRefresh },
+    )
+    apiExpanded = expandTranslationsToAllIds(
+      pageKey,
+      sourceLang,
+      targetLang,
+      apiResult.translations,
+      idToText,
+      textHashToIds,
+    )
+    if (apiResult.translations.length) {
+      try {
+        await persistent.setMany(
+          apiResult.translations.map((row) => ({
+            key: makeTranslationCacheKey('', sourceLang, targetLang, idToText.get(row.id) ?? ''),
+            translation: row.translation,
+          })),
+        )
+      } catch {
+        // Write-through is best-effort; the translations above are already delivered.
+      }
+    }
+  }
+
+  const translations = [...cached, ...l2Expanded, ...apiExpanded]
+  if (apiResult.ok) return { ok: true, translations }
+
+  // A failed representative id fails every id sharing its text.
+  const cacheKeyById = new Map<string, string>()
+  for (const [cacheKey, ids] of textHashToIds) {
+    for (const id of ids) cacheKeyById.set(id, cacheKey)
+  }
+  const failedSet = new Set<string>()
+  for (const failedId of apiResult.failedIds) {
+    const cacheKey = cacheKeyById.get(failedId)
+    if (!cacheKey) {
+      failedSet.add(failedId)
+      continue
+    }
+    for (const id of textHashToIds.get(cacheKey) ?? [failedId]) failedSet.add(id)
+  }
+  return { ok: false, error: apiResult.error, failedIds: [...failedSet], translations }
+}
+
+/** Session (L1) + persistent (L2) cache sizes for the options-page manager. */
+export async function translationCacheOverview(): Promise<{
+  sessionEntries: number
+  sessionChars: number
+  persistentEntries: number
+  persistentChars: number
+}> {
+  const stats = await sharedPersistentCache.stats()
+  return {
+    sessionEntries: textCache.size,
+    sessionChars: textCache.charCount,
+    persistentEntries: stats.entries,
+    persistentChars: stats.approxChars,
+  }
+}
+
+/** Wipe both cache layers (options-page “清空缓存”). In-flight requests are unaffected. */
+export async function clearAllTranslationCaches(): Promise<void> {
+  textCache.clear()
+  hydrationPromise = null
+  const area = sessionStorage()
+  if (area) {
+    // Queue behind any in-flight snapshot write: a pre-clear snapshot landing
+    // after the wipe would resurrect cleared entries on the next worker wake.
+    const removed = persistenceChain.then(() => area.remove(CACHE_STORAGE_KEY))
+    persistenceChain = removed.catch(() => undefined)
+    await persistenceChain
+  }
+  await sharedPersistentCache.clear()
+}
+
+/** Fetch the provider's model catalog for the options-page dropdown. */
+export async function listAvailableModels(
+  baseURL: string,
+  apiKey: string,
+): Promise<{ ok: true; models: string[] } | { ok: false; error: string }> {
+  const result = await listModels(baseURL, apiKey)
+  if (result.ok) return result
+  return { ok: false, error: describeUpstreamError(result.error, result.status) }
 }
 
 export type ConnectionTestResult = { ok: true } | { ok: false; error: string }
@@ -526,6 +715,53 @@ export function getCachedTranslation(
   return textCache.get(key)
 }
 
+/**
+ * Single-word dictionary card (lens). Cached in the shared LRU under a `dict|`
+ * namespace so cards never collide with sentence translations.
+ */
+export async function translateDictionaryEntry(
+  text: string,
+  sourceLang: string,
+  targetLang: string,
+  settings: UserSettings,
+): Promise<{ ok: true; entry: DictionaryEntry } | { ok: false; error: string }> {
+  const cacheKey = `dict|${sourceLang}|${targetLang}|${makeTranslationCacheKey('', '', '', text)}`
+  const cached = textCache.get(cacheKey)
+  if (cached !== undefined) {
+    try {
+      const parsed = parseDictionaryResult(JSON.parse(cached), text)
+      if (parsed.ok) return parsed
+    } catch {
+      // Corrupt cache payload — fall through and refetch.
+    }
+  }
+
+  const request = {
+    baseURL: settings.baseURL,
+    apiKey: settings.apiKey,
+    model: settings.model,
+    systemPrompt: 'You are a precise bilingual dictionary. Output JSON only.',
+    userPrompt: buildDictionaryPrompt(sourceLang, targetLang, text),
+    provider: settings.provider,
+    reasoningPref: settings.reasoningPref,
+  }
+  let result = await chatCompletionsJson({ ...request, useJsonSchema: true })
+  if (!result.ok && result.status === 400) {
+    result = await chatCompletionsJson({ ...request, useJsonSchema: false })
+  }
+  if (!result.ok) return { ok: false, error: result.error }
+
+  try {
+    const parsed = parseDictionaryResult(JSON.parse(result.content), text)
+    if (!parsed.ok) return { ok: false, error: `词典结果格式无效：${parsed.error}` }
+    textCache.set(cacheKey, result.content)
+    void persistTranslationCache()
+    return parsed
+  } catch {
+    return { ok: false, error: '词典结果不是有效 JSON' }
+  }
+}
+
 
 /**
  * Resolve cache hits by **normalized text** (not DOM id).
@@ -536,6 +772,7 @@ export function filterUncachedByText(
   sourceLang: string,
   targetLang: string,
   blocks: TranslateBlock[],
+  opts?: { skipCache?: boolean },
 ): {
   cached: { id: string; translation: string }[]
   /** Unique texts only (one block per identical sentence). */
@@ -549,15 +786,18 @@ export function filterUncachedByText(
   const textHashToIds = new Map<string, string[]>()
   const idToText = new Map<string, string>()
   const seenMissingHash = new Set<string>()
+  const skipCache = opts?.skipCache === true
 
   for (const b of blocks) {
     const norm = normalizeText(b.text)
     idToText.set(b.id, norm)
     const cacheKey = makeTranslationCacheKey(pageKey, sourceLang, targetLang, norm)
-    const hit = textCache.get(cacheKey)
-    if (hit !== undefined) {
-      cached.push({ id: b.id, translation: hit })
-      continue
+    if (!skipCache) {
+      const hit = textCache.get(cacheKey)
+      if (hit !== undefined) {
+        cached.push({ id: b.id, translation: hit })
+        continue
+      }
     }
 
     // Group identical texts

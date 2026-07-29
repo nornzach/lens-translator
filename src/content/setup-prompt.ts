@@ -166,8 +166,8 @@ function copyForReason(
 ): { title: string; body: string; primary: 'download' | 'llm' | 'none' } {
   if (reason.kind === 'browser-unsupported') {
     return {
-      title: '当前浏览器不支持内置翻译',
-      body: '需要桌面版 Chrome 138+ 的 Translator API，或改用外部 LLM 完成翻译。',
+      title: '当前浏览器未提供内置翻译',
+      body: '需要桌面版 Chrome 138+。若你以前能用，可先重新加载扩展或重启 Chrome 再试；也可改用外部 LLM。',
       primary: 'llm',
     }
   }
@@ -189,6 +189,13 @@ function copyForReason(
     return {
       title: '当前语言对不可用',
       body: `Chrome 内置翻译不支持 ${pairLabel}。请更换语言，或切换到外部 LLM。`,
+      primary: 'llm',
+    }
+  }
+  if (reason.availability === 'unsupported') {
+    return {
+      title: '当前浏览器不支持内置翻译',
+      body: '需要桌面版 Chrome 138+ 的 Translator API，或改用外部 LLM 完成翻译。',
       primary: 'llm',
     }
   }

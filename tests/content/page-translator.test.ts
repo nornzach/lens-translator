@@ -147,3 +147,52 @@ describe('isPageTranslationCandidate', () => {
     expect(isPageTranslationCandidate(candidate, 10)).toBe(true)
   })
 })
+
+describe('pageStyles display modes', () => {
+  const base = {
+    sourceLang: 'en',
+    targetLang: 'zh',
+    pageTranslationEngine: 'browser',
+    pageTranslationFontFamily: 'system',
+    pageTranslationFontSizePx: 14,
+    pageTranslationUseCustomColor: false,
+    pageTranslationTextColor: '#0e7490',
+    pageTranslationUseBackground: false,
+    pageTranslationBackgroundColor: '#ecfeff',
+    pageTranslationBold: false,
+    pageTranslationItalic: false,
+    pageTranslationUnderline: false,
+    batchCharLimit: 6000,
+    minTextLength: 10,
+  } as const
+
+  it('bilingual mode adds no collapsing or blur rules', async () => {
+    const { pageStyles } = await import('../../src/content/page-translator')
+    const css = pageStyles({ ...base, pageTranslationDisplayMode: 'bilingual' })
+    expect(css).not.toContain('font-size: 0 !important')
+    expect(css).not.toContain('blur')
+  })
+
+  it('translation-only collapses hosts but keeps ::after at absolute size', async () => {
+    const { pageStyles } = await import('../../src/content/page-translator')
+    const css = pageStyles({ ...base, pageTranslationDisplayMode: 'translation-only' })
+    expect(css).toContain('font-size: 0 !important')
+    // UI ::after variants use em sizes — mode must force absolute px everywhere.
+    expect(css).toContain('font-size: 14px !important')
+  })
+
+  it('renders a shimmer placeholder at pending translation positions', async () => {
+    const { pageStyles } = await import('../../src/content/page-translator')
+    const css = pageStyles({ ...base, pageTranslationDisplayMode: 'bilingual' })
+    expect(css).toContain('@keyframes lens-translator-pending-shimmer')
+    expect(css).toContain('[data-lens-page-pending]::after')
+    expect(css).toContain('[data-lens-page-pending][data-lens-page-ui-pending]::after')
+  })
+
+  it('learning mode blurs translations until hover', async () => {
+    const { pageStyles } = await import('../../src/content/page-translator')
+    const css = pageStyles({ ...base, pageTranslationDisplayMode: 'learning' })
+    expect(css).toContain('blur(5px)')
+    expect(css).toContain(':hover::after')
+  })
+})

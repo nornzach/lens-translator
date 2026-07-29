@@ -283,15 +283,22 @@ const NON_CONTENT_TEXT_TAGS = new Set(['script', 'style', 'noscript', 'template'
  * subscription props in a <script type="application/json"> beside the "Watch" button). That
  * leaked JSON otherwise reaches the model and comes back as garbled translation, so we walk
  * text nodes and skip those subtrees.
+ *
+ * `maxChars` stops the walk early (returning an over-limit string). For threshold
+ * checks only — e.g. the lens rejects blocks over 4000 chars, so walking a huge
+ * SPA root per mousemove frame just to learn "too big" was pure GC churn.
  */
-export function elementText(el: Element): string {
+export function elementText(el: Element, maxChars?: number): string {
+  const canWalk =
+    typeof document !== 'undefined' && typeof document.createTreeWalker === 'function'
   if (
-    typeof el.querySelector !== 'function' ||
-    typeof document === 'undefined' ||
-    typeof document.createTreeWalker !== 'function' ||
-    !el.querySelector('script, style, noscript, template')
+    !canWalk ||
+    (maxChars === undefined &&
+      (typeof el.querySelector !== 'function' ||
+        !el.querySelector('script, style, noscript, template')))
   ) {
-    return el.textContent ?? ''
+    const text = el.textContent ?? ''
+    return maxChars !== undefined && text.length > maxChars ? text.slice(0, maxChars) : text
   }
   const walker = document.createTreeWalker(el, 4 /* SHOW_TEXT */, {
     acceptNode(node) {
@@ -309,6 +316,7 @@ export function elementText(el: Element): string {
   let node = walker.nextNode()
   while (node) {
     text += node.nodeValue ?? ''
+    if (maxChars !== undefined && text.length > maxChars) return text
     node = walker.nextNode()
   }
   return text
@@ -701,7 +709,9 @@ export function extractLensBlockAtElement(
         rendered = true
       }
       if (rendered) {
-        const text = sourceTextOf(el)
+        // Over-limit blocks are rejected below anyway — never materialize a
+        // whole subtree's text on the pointer hot path (see elementText).
+        const text = normalizeText(elementText(el, LENS_MAX_TEXT_LENGTH + 1))
         const min = lensMinFor(el, minTextLength)
         if (
           isTranslatableText(text, min) &&
@@ -720,6 +730,60 @@ export function extractLensBlockAtElement(
     current = el.parentElement
   }
   return undefined
+}
+
+// ---------------------------------------------------------------------------
+// Lens-only editable-field resolution (input back-translation)
+// ---------------------------------------------------------------------------
+
+export type EditableTarget = {
+  el: HTMLElement
+  kind: 'textarea' | 'input' | 'contenteditable'
+  text: string
+  /** False for disabled/readOnly fields — the replace action must stay hidden. */
+  writable: boolean
+}
+
+/** Input types that hold free text; everything else (password, number, …) is skipped. */
+const TEXT_INPUT_TYPES = new Set(['', 'text', 'search', 'url', 'email'])
+
+/**
+ * Resolve an editable field at/above the pointer hit for the lens' writing
+ * mode. Full-page and auto-scan paths keep skipping editables — this is only
+ * reachable through explicit lens activation.
+ */
+export function extractEditableTarget(
+  hit: Element | null,
+  maxChars = LENS_MAX_TEXT_LENGTH,
+): EditableTarget | null {
+  const host = hit?.closest(
+    'textarea, input, [contenteditable]:not([contenteditable="false"])',
+  ) as HTMLElement | null
+  if (!host) return null
+  if (host.closest('[data-lens-ignore], #lens-translator-root, #lens-translator-bubble-root, #lens-translator-selection-root, #lens-translator-setup-prompt')) {
+    return null
+  }
+
+  const tag = host.tagName.toLowerCase()
+  if (tag === 'textarea') {
+    const field = host as HTMLTextAreaElement
+    const text = normalizeText(field.value)
+    if (!text || text.length > maxChars) return null
+    return { el: field, kind: 'textarea', text, writable: !field.disabled && !field.readOnly }
+  }
+  if (tag === 'input') {
+    const field = host as HTMLInputElement
+    if (!TEXT_INPUT_TYPES.has(field.type)) return null
+    const text = normalizeText(field.value)
+    if (!text || text.length > maxChars) return null
+    return { el: field, kind: 'input', text, writable: !field.disabled && !field.readOnly }
+  }
+  if (host.isContentEditable) {
+    const text = normalizeText(elementText(host, maxChars + 1))
+    if (!text || text.length > maxChars) return null
+    return { el: host, kind: 'contenteditable', text, writable: true }
+  }
+  return null
 }
 
 /**

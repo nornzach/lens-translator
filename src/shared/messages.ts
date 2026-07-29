@@ -10,6 +10,14 @@ export type TranslateBatchRequestMsg = {
   type: 'translate-batch'
   pageKey: string
   blocks: TranslateBlock[]
+  /**
+   * Optional language-pair override (input back-translation, dictionary with
+   * auto-detected source). Background falls back to stored settings when absent.
+   */
+  sourceLang?: string
+  targetLang?: string
+  /** Bypass every cache read; fresh results still overwrite both cache layers. */
+  forceRefresh?: boolean
 }
 
 export type TranslateImageRequestMsg = {
@@ -55,6 +63,8 @@ export type ContentSettings = Pick<
   | 'autoPageTranslation'
   | 'selectionTranslate'
   | 'showFloatingBubble'
+  | 'inputTranslate'
+  | 'pageTranslationDisplayMode'
   | 'pageTranslationFontFamily'
   | 'pageTranslationFontSizePx'
   | 'pageTranslationUseCustomColor'
@@ -72,6 +82,12 @@ export type ContentSettings = Pick<
   | 'pageTranslationHotkey'
 > & { apiKey: '' }
 
+/** Effective per-host rule after SW resolution (null = follow global settings). */
+export type EffectiveSiteRule = {
+  autoPage?: 'force-on' | 'force-off'
+  engine?: 'browser' | 'external'
+}
+
 export type SettingsMsg = {
   type: 'settings'
   /** Minimal content-script settings: no endpoint, model, provider, or secret fields. */
@@ -80,6 +96,8 @@ export type SettingsMsg = {
   paused: boolean
   /** Computed against complete background settings before minimization. */
   configured: boolean
+  /** Site rule already applied to `settings`; surfaced for UI display only. */
+  siteRule: EffectiveSiteRule | null
 }
 
 export type PauseHostnameMsg = {
@@ -120,7 +138,7 @@ export type ToggleLensResult =
 
 export type BubbleControlMsg = {
   type: 'bubble-control'
-  command: 'get-state' | 'toggle-page-translation' | 'toggle-lens'
+  command: 'get-state' | 'toggle-page-translation' | 'toggle-lens' | 'retranslate-page'
 }
 
 export type TestVisionMsg = {
@@ -131,6 +149,20 @@ export type TestVisionMsg = {
   provider: UserSettings['provider']
   reasoningPref: UserSettings['reasoningPref']
 }
+
+/**
+ * Options-page-only model catalog query (OpenAI-compatible GET /models).
+ * Same trusted-origin rule as test-connection: the key may be unsaved.
+ */
+export type ListModelsMsg = {
+  type: 'list-models'
+  baseURL: string
+  apiKey: string
+}
+
+export type ListModelsResult =
+  | { type: 'list-models-result'; ok: true; models: string[] }
+  | { type: 'list-models-result'; ok: false; error: string }
 
 export type TestVisionResult =
   | { type: 'test-vision-result'; ok: true }
@@ -144,12 +176,149 @@ export type BubbleControlResult =
     }
   | { ok: false; error: string }
 
+/** Options-page cache manager: sizes for both layers, and a full wipe. */
+export type GetCacheStatsMsg = { type: 'get-cache-stats' }
+export type CacheStatsResult =
+  | {
+      type: 'cache-stats-result'
+      ok: true
+      sessionEntries: number
+      sessionChars: number
+      persistentEntries: number
+      persistentChars: number
+    }
+  | { type: 'cache-stats-result'; ok: false; error: string }
+
+export type ClearTranslationCacheMsg = { type: 'clear-translation-cache' }
+export type ClearTranslationCacheResult =
+  | { type: 'clear-translation-cache-result'; ok: true }
+  | { type: 'clear-translation-cache-result'; ok: false; error: string }
+
 export type BackgroundErrorResult = {
   type: 'background-error'
   ok: false
   requestType: ToBackground['type']
   error: string
 }
+
+/** Content / options → background: proxy Chrome Translator via offscreen document. */
+export type BrowserTranslatorRequest =
+  | { type: 'browser-translator'; op: 'is-supported' }
+  | {
+      type: 'browser-translator'
+      op: 'availability'
+      sourceLanguage: string
+      targetLanguage: string
+    }
+  | {
+      type: 'browser-translator'
+      op: 'prepare'
+      sourceLanguage: string
+      targetLanguage: string
+    }
+  | {
+      type: 'browser-translator'
+      op: 'translate'
+      text: string
+      sourceLanguage: string
+      targetLanguage: string
+    }
+
+export type BrowserTranslatorIsSupportedResult = {
+  type: 'browser-translator-result'
+  ok: true
+  op: 'is-supported'
+  supported: boolean
+}
+
+export type BrowserTranslatorAvailabilityResult = {
+  type: 'browser-translator-result'
+  ok: true
+  op: 'availability'
+  availability: import('./browser-translator-core').BrowserTranslatorAvailability
+}
+
+export type BrowserTranslatorPrepareResult = {
+  type: 'browser-translator-result'
+  ok: true
+  op: 'prepare'
+  ready: boolean
+  /** Present when ready is false — host-side lastError for diagnostics. */
+  error?: string
+}
+
+export type BrowserTranslatorTranslateResult = {
+  type: 'browser-translator-result'
+  ok: true
+  op: 'translate'
+  translation: string | null
+}
+
+export type BrowserTranslatorResult =
+  | BrowserTranslatorIsSupportedResult
+  | BrowserTranslatorAvailabilityResult
+  | BrowserTranslatorPrepareResult
+  | BrowserTranslatorTranslateResult
+  | { type: 'browser-translator-result'; ok: false; error: string }
+
+/**
+ * Background → translator host document only.
+ * Host is a top-level extension page (minimized popup), not offscreen —
+ * Chrome's Translator API is unavailable in offscreen documents.
+ */
+export type BrowserTranslatorHostRequest =
+  | { type: 'browser-translator-host'; target: 'translator-host'; op: 'is-supported' }
+  | {
+      type: 'browser-translator-host'
+      target: 'translator-host'
+      op: 'availability'
+      sourceLanguage: string
+      targetLanguage: string
+    }
+  | {
+      type: 'browser-translator-host'
+      target: 'translator-host'
+      op: 'prepare'
+      sourceLanguage: string
+      targetLanguage: string
+    }
+  | {
+      type: 'browser-translator-host'
+      target: 'translator-host'
+      op: 'translate'
+      text: string
+      sourceLanguage: string
+      targetLanguage: string
+    }
+
+/** @deprecated alias kept for type imports during transition */
+export type BrowserTranslatorOffscreenRequest = BrowserTranslatorHostRequest
+
+/** Translator host page → background: idle host window asks to be closed. */
+export type CloseTranslatorHostMsg = { type: 'close-translator-host' }
+export type CloseTranslatorHostResult = { type: 'close-translator-host-result'; ok: boolean }
+
+/** Content → background: speak/stop text via chrome.tts (not available in content scripts). */
+export type TtsSpeakMsg = { type: 'tts-speak'; text: string; lang: string }
+export type TtsStopMsg = { type: 'tts-stop' }
+export type TtsSpeakResult =
+  | { type: 'tts-speak-result'; ok: true }
+  | { type: 'tts-speak-result'; ok: false; error: string }
+
+/** Content → background: single-word dictionary card (external engine only). */
+export type TranslateDictRequestMsg = {
+  type: 'translate-dict'
+  text: string
+  sourceLanguage: string
+  targetLanguage: string
+}
+export type TranslateDictResult =
+  | {
+      type: 'translate-dict-result'
+      ok: true
+      entry: import('./schema').DictionaryEntry
+    }
+  | { type: 'translate-dict-result'; ok: false; error: string }
 
 export type ToBackground =
   | TranslateBatchRequestMsg
@@ -159,6 +328,14 @@ export type ToBackground =
   | OpenOptionsMsg
   | TestConnectionMsg
   | TestVisionMsg
+  | ListModelsMsg
+  | GetCacheStatsMsg
+  | ClearTranslationCacheMsg
+  | BrowserTranslatorRequest
+  | CloseTranslatorHostMsg
+  | TtsSpeakMsg
+  | TtsStopMsg
+  | TranslateDictRequestMsg
 export type FromBackground =
   | TranslateBatchResultOk
   | TranslateBatchResultErr
@@ -167,5 +344,12 @@ export type FromBackground =
   | SettingsMsg
   | TestConnectionResult
   | TestVisionResult
+  | ListModelsResult
+  | CacheStatsResult
+  | ClearTranslationCacheResult
   | BackgroundErrorResult
+  | BrowserTranslatorResult
+  | CloseTranslatorHostResult
+  | TtsSpeakResult
+  | TranslateDictResult
   | { type: 'open-options-result'; ok: boolean }

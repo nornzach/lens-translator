@@ -9,6 +9,7 @@ import {
   Palette,
   PanelRightClose,
   Pin,
+  RefreshCw,
   Save,
   ScanText,
   Settings2,
@@ -23,6 +24,7 @@ import {
   loadSettings,
   mergeSettings,
   saveSettings,
+  type SiteRule,
   type TranslationEngine,
   type UserSettings,
 } from '../shared/settings'
@@ -39,6 +41,7 @@ const iconNodes: Record<string, IconNode> = {
   palette: Palette,
   'panel-close': PanelRightClose,
   pin: Pin,
+  refresh: RefreshCw,
   save: Save,
   'scan-text': ScanText,
   settings: Settings2,
@@ -71,6 +74,17 @@ async function activeTabId(): Promise<number> {
   return tab.id
 }
 
+async function activeTabHostname(): Promise<string> {
+  try {
+    const tab = await chrome.tabs.get(await activeTabId())
+    if (!tab.url) return ''
+    const url = new URL(tab.url)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.hostname : ''
+  } catch {
+    return ''
+  }
+}
+
 function isBubbleResult(value: unknown): value is BubbleControlResult {
   if (!value || typeof value !== 'object' || !('ok' in value)) return false
   if (value.ok === true) {
@@ -101,6 +115,56 @@ function renderControlState(state: BubbleControlResult): void {
   el('orbState').dataset.active = state.lensActive || state.pageTranslationActive ? 'true' : 'false'
 }
 
+// ---------------------------------------------------------------------------
+// Current-site rules
+// ---------------------------------------------------------------------------
+
+let currentHost = ''
+
+function setSegmented(id: string, value: string): void {
+  for (const button of el(id).querySelectorAll<HTMLButtonElement>('[data-value]')) {
+    button.dataset.active = button.dataset.value === value ? 'true' : 'false'
+  }
+}
+
+function renderSiteRule(): void {
+  const section = el<HTMLElement>('siteRuleSection')
+  if (!currentHost) {
+    section.hidden = true
+    return
+  }
+  section.hidden = false
+  el<HTMLElement>('siteRuleHost').textContent = currentHost
+  const rule = settings.siteRules[currentHost.toLowerCase()]
+  setSegmented('siteRuleAutoPage', rule?.autoPage ?? '')
+  setSegmented('siteRuleEngine', rule?.engine ?? '')
+}
+
+function setupSiteRuleControls(): void {
+  for (const id of ['siteRuleAutoPage', 'siteRuleEngine'] as const) {
+    el(id).addEventListener('click', (event) => {
+      const button = (event.target as Element).closest<HTMLButtonElement>('[data-value]')
+      if (!button || !currentHost) return
+      const value = button.dataset.value ?? ''
+      const host = currentHost.toLowerCase()
+      const rule: SiteRule = { ...settings.siteRules[host] }
+      if (id === 'siteRuleAutoPage') {
+        if (value === 'force-on' || value === 'force-off') rule.autoPage = value
+        else delete rule.autoPage
+      } else {
+        if (value === 'browser' || value === 'external') rule.engine = value
+        else delete rule.engine
+      }
+      const siteRules = { ...settings.siteRules }
+      if (!rule.autoPage && !rule.engine) delete siteRules[host]
+      else siteRules[host] = rule
+      settings = mergeSettings({ ...settings, siteRules })
+      renderSiteRule()
+      void queueSave(settings).then(() => showStatus('站点规则已保存'), () => undefined)
+    })
+  }
+}
+
 function setActionState(buttonId: string, labelId: string, active: boolean): void {
   el<HTMLButtonElement>(buttonId).dataset.active = active ? 'true' : 'false'
   el(labelId).textContent = active ? '运行中' : '已关闭'
@@ -115,6 +179,7 @@ function showStatus(text: string, error = false): void {
 function renderSettings(): void {
   el('connectionState').textContent = isConfigured(settings) ? '外部接口已配置' : '外部接口待配置'
   el('connectionState').dataset.configured = isConfigured(settings) ? 'true' : 'false'
+  el<HTMLSelectElement>('displayMode').value = settings.pageTranslationDisplayMode
   el<HTMLSelectElement>('fontFamily').value = settings.pageTranslationFontFamily
   el<HTMLInputElement>('fontSize').value = String(settings.pageTranslationFontSizePx)
   el('fontSizeValue').textContent = `${settings.pageTranslationFontSizePx}px`
@@ -181,6 +246,8 @@ function queueSave(next: UserSettings): Promise<void> {
 function readStyleControls(): void {
   settings = mergeSettings({
     ...settings,
+    pageTranslationDisplayMode: el<HTMLSelectElement>('displayMode')
+      .value as UserSettings['pageTranslationDisplayMode'],
     pageTranslationFontFamily: el<HTMLSelectElement>('fontFamily').value,
     pageTranslationFontSizePx: Number(el<HTMLInputElement>('fontSize').value),
     pageTranslationUseCustomColor: el<HTMLInputElement>('useTextColor').checked,
@@ -245,6 +312,9 @@ async function testLlmConnection(): Promise<void> {
 async function init(): Promise<void> {
   settings = await loadSettings()
   renderSettings()
+  currentHost = await activeTabHostname()
+  renderSiteRule()
+  setupSiteRuleControls()
   try {
     renderControlState(await sendControl('get-state'))
   } catch {
@@ -280,6 +350,14 @@ async function init(): Promise<void> {
       showStatus(error instanceof Error ? error.message : String(error), true)
     }
   })
+  el<HTMLButtonElement>('pageRefresh').addEventListener('click', async () => {
+    try {
+      renderControlState(await sendControl('retranslate-page'))
+      showStatus('正在忽略缓存重新翻译本页…')
+    } catch (error) {
+      showStatus(error instanceof Error ? error.message : String(error), true)
+    }
+  })
 
   for (const group of document.querySelectorAll<HTMLElement>('[data-engine-scope]')) {
     group.addEventListener('click', (event) => {
@@ -296,7 +374,7 @@ async function init(): Promise<void> {
     })
   }
 
-  for (const id of ['fontFamily', 'fontSize', 'useTextColor', 'textColor', 'useBackground', 'backgroundColor']) {
+  for (const id of ['displayMode', 'fontFamily', 'fontSize', 'useTextColor', 'textColor', 'useBackground', 'backgroundColor']) {
     el(id).addEventListener('input', readStyleControls)
     el(id).addEventListener('change', readStyleControls)
   }

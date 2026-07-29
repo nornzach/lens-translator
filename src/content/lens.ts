@@ -1,3 +1,5 @@
+import type { DictionaryEntry } from '../shared/schema'
+
 export type LensViewState =
   | { kind: 'hidden' }
   | {
@@ -22,6 +24,23 @@ export type LensViewState =
       sourceRect?: DOMRect
     }
   | { kind: 'unconfigured' }
+  | {
+      /** Writing mode: editable field content + back-translation + replace action. */
+      kind: 'editable'
+      sourceText: string
+      translation: string | null
+      status: 'pending' | 'ready' | 'error'
+      error?: string
+      writable: boolean
+      sourceRect?: DOMRect
+    }
+  | {
+      /** Dictionary card for single words (external engine). */
+      kind: 'dict'
+      entry: DictionaryEntry
+      sourceText: string
+      sourceRect?: DOMRect
+    }
 
 type LensAppearance = {
   pageTranslationUseCustomColor: boolean
@@ -49,6 +68,16 @@ export class LensOverlay {
   private divider: HTMLDivElement
   private hint: HTMLDivElement
   private ring: HTMLDivElement
+  private toolbar: HTMLDivElement
+  private starBtn: HTMLButtonElement
+  private speakSourceBtn: HTMLButtonElement
+  private speakTargetBtn: HTMLButtonElement
+  private dictCard: HTMLDivElement
+  private actionRow: HTMLDivElement
+  private actionBtn: HTMLButtonElement
+  private actionHandler: (() => void) | null = null
+  private starHandler: (() => void) | null = null
+  private speakHandler: ((which: 'source' | 'target') => void) | null = null
   private highlightEl: Element | null = null
   private widthPx: number
   private lastSourceKey = ''
@@ -125,12 +154,48 @@ export class LensOverlay {
     this.hint = document.createElement('div')
     this.hint.className = 'hint'
 
+    this.toolbar = document.createElement('div')
+    this.toolbar.className = 'toolbar'
+    this.starBtn = LensOverlay.iconButton('star', '收藏到生词本')
+    this.starBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      this.starHandler?.()
+    })
+    this.speakSourceBtn = LensOverlay.iconButton('speak', '朗读原文')
+    this.speakSourceBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      this.speakHandler?.('source')
+    })
+    this.speakTargetBtn = LensOverlay.iconButton('speak', '朗读译文')
+    this.speakTargetBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      this.speakHandler?.('target')
+    })
+    this.toolbar.append(this.starBtn, this.speakSourceBtn, this.speakTargetBtn)
+
+    this.dictCard = document.createElement('div')
+    this.dictCard.className = 'dict-card'
+
+    this.actionRow = document.createElement('div')
+    this.actionRow.className = 'action-row'
+    this.actionBtn = document.createElement('button')
+    this.actionBtn.type = 'button'
+    this.actionBtn.className = 'action-btn'
+    this.actionBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      this.actionHandler?.()
+    })
+    this.actionRow.append(this.actionBtn)
+
     this.textLayer.append(
+      this.toolbar,
       this.sourceLabel,
       this.sourceBody,
       this.divider,
       this.zhLabel,
       this.body,
+      this.dictCard,
+      this.actionRow,
       this.hint,
     )
     this.panel.append(effect, tint, shine, this.textLayer)
@@ -141,6 +206,35 @@ export class LensOverlay {
   private applyWidth(): void {
     this.panel.style.width = `${this.widthPx}px`
     this.panel.style.maxWidth = `${this.widthPx}px`
+  }
+
+  private static iconButton(icon: 'star' | 'speak', title: string): HTMLButtonElement {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = `icon-btn icon-${icon}`
+    button.title = title
+    button.setAttribute('aria-label', title)
+    button.textContent = icon === 'star' ? '☆' : '🔊'
+    return button
+  }
+
+  /** Controller hooks — rebound per state, so they always close over fresh data. */
+  onAction(handler: (() => void) | null): void {
+    this.actionHandler = handler
+  }
+
+  onStar(handler: (() => void) | null): void {
+    this.starHandler = handler
+  }
+
+  onSpeak(handler: ((which: 'source' | 'target') => void) | null): void {
+    this.speakHandler = handler
+  }
+
+  /** Mark the star when the current content is already in the notebook. */
+  setStarActive(active: boolean): void {
+    this.starBtn.textContent = active ? '★' : '☆'
+    this.starBtn.classList.toggle('is-active', active)
   }
 
   mount(): void {
@@ -216,22 +310,43 @@ export class LensOverlay {
     this.body.classList.remove('muted', 'pending-anim')
     this.sourceBody.classList.remove('muted')
 
+    const isDict = state.kind === 'dict'
+    const isEditable = state.kind === 'editable'
     const sourceText =
       'sourceText' in state && state.sourceText ? state.sourceText : ''
+    const translationText =
+      state.kind === 'ready'
+        ? state.text
+        : isEditable && state.status === 'ready'
+          ? state.translation
+          : null
 
     // Bilingual sections
-    const showSource = Boolean(sourceText)
+    const showSource = Boolean(sourceText) && !isDict
     this.sourceLabel.hidden = !showSource
     this.sourceBody.hidden = !showSource
     this.divider.hidden = !showSource
     this.zhLabel.hidden =
-      state.kind === 'empty' || state.kind === 'target-language' || state.kind === 'unconfigured'
+      isDict ||
+      state.kind === 'empty' ||
+      state.kind === 'target-language' ||
+      state.kind === 'unconfigured'
 
     if (showSource) {
       this.sourceBody.textContent = sourceText
     } else {
       this.sourceBody.textContent = ''
     }
+
+    this.dictCard.hidden = !isDict
+    if (isDict) this.renderDictCard(state.entry)
+
+    this.actionRow.hidden = !(
+      isEditable &&
+      state.status === 'ready' &&
+      state.writable &&
+      state.translation
+    )
 
     switch (state.kind) {
       case 'ready':
@@ -272,14 +387,54 @@ export class LensOverlay {
         this.body.classList.add('muted')
         this.body.textContent = '翻译引擎未就绪，请下载语言包或配置外部 LLM'
         break
+      case 'editable':
+        this.zhLabel.textContent = '回译'
+        if (state.status === 'pending') {
+          this.body.classList.add('muted', 'pending-anim')
+          this.body.textContent = '回译中…'
+        } else if (state.status === 'error') {
+          this.body.classList.add('muted')
+          this.body.textContent = state.error ?? '回译失败'
+        } else {
+          this.body.textContent = state.translation ?? ''
+        }
+        break
+      case 'dict':
+        this.body.textContent = ''
+        break
     }
 
-    this.hint.textContent = '可选择文本复制 · Esc 关闭'
+    this.hint.textContent = isEditable
+      ? '「替换为译文」会改写输入框全部内容 · Esc 关闭'
+      : '可选择文本复制 · Esc 关闭'
+
+    // Toolbar: star needs a translation; source speak needs source text.
+    this.starBtn.hidden = !(
+      state.kind === 'ready' ||
+      isDict ||
+      (isEditable && state.status === 'ready')
+    )
+    this.speakSourceBtn.hidden = !sourceText
+    this.speakTargetBtn.hidden = !translationText
+    this.toolbar.hidden =
+      this.starBtn.hidden && this.speakSourceBtn.hidden && this.speakTargetBtn.hidden
 
     const sourceRect =
       'sourceRect' in state && state.sourceRect ? state.sourceRect : null
     if (sourceRect) {
-      const nextKey = `${Math.round(sourceRect.left)}|${Math.round(sourceRect.top)}|${Math.round(sourceRect.right)}|${Math.round(sourceRect.bottom)}`
+      // Content changes (pending → ready with a longer translation) change the
+      // panel height, so the placement clamp must re-run even when the source
+      // rect is unchanged — otherwise a tall panel can overflow the viewport.
+      const contentKey = `${state.kind}:${sourceText.length}:${
+        'text' in state && state.text ? state.text.length : 0
+      }:${'message' in state && state.message ? state.message.length : 0}:${
+        'translation' in state && state.translation ? state.translation.length : 0
+      }:${
+        'entry' in state
+          ? state.entry.senses.length * 100 + state.entry.examples.length * 10
+          : 0
+      }`
+      const nextKey = `${Math.round(sourceRect.left)}|${Math.round(sourceRect.top)}|${Math.round(sourceRect.right)}|${Math.round(sourceRect.bottom)}|${contentKey}`
       if (nextKey !== this.lastSourceKey) {
         this.lastSourceKey = nextKey
         this.placePanel(clientX, clientY, sourceRect)
@@ -288,6 +443,51 @@ export class LensOverlay {
       this.lastSourceKey = ''
       this.placePanel(clientX, clientY, null)
     }
+  }
+
+  private renderDictCard(entry: DictionaryEntry): void {
+    const title = document.createElement('div')
+    title.className = 'dict-word'
+    title.textContent = entry.word
+    const parts: HTMLElement[] = [title]
+    if (entry.phonetic) {
+      const phonetic = document.createElement('span')
+      phonetic.className = 'dict-phonetic'
+      phonetic.textContent = entry.phonetic
+      title.append(phonetic)
+    }
+    const senses = document.createElement('ol')
+    senses.className = 'dict-senses'
+    for (const sense of entry.senses) {
+      const item = document.createElement('li')
+      if (sense.pos) {
+        const pos = document.createElement('span')
+        pos.className = 'dict-pos'
+        pos.textContent = sense.pos
+        item.append(pos)
+      }
+      item.append(document.createTextNode(sense.gloss))
+      senses.append(item)
+    }
+    parts.push(senses)
+    if (entry.examples.length) {
+      const examples = document.createElement('div')
+      examples.className = 'dict-examples'
+      for (const example of entry.examples) {
+        const row = document.createElement('div')
+        row.className = 'dict-example'
+        const source = document.createElement('div')
+        source.className = 'dict-example-source'
+        source.textContent = example.source
+        const translation = document.createElement('div')
+        translation.className = 'dict-example-translation'
+        translation.textContent = example.translation
+        row.append(source, translation)
+        examples.append(row)
+      }
+      parts.push(examples)
+    }
+    this.dictCard.replaceChildren(...parts)
   }
 
 
@@ -582,6 +782,96 @@ const LENS_STYLES = `
     line-height: 1.4;
   }
 
+  .toolbar {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    display: flex;
+    gap: 2px;
+    z-index: 4;
+  }
+
+  .icon-btn {
+    appearance: none;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    padding: 3px 5px;
+    font-size: 13px;
+    line-height: 1;
+    color: rgba(91, 100, 114, 0.95);
+    cursor: pointer;
+  }
+  .icon-btn:hover { background: rgba(15, 23, 42, 0.07); }
+  .icon-btn.is-active { color: #d97706; }
+
+  .action-row {
+    margin-top: 10px;
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .action-btn {
+    appearance: none;
+    border: 0;
+    border-radius: 8px;
+    background: #2563eb;
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 7px 12px;
+    cursor: pointer;
+  }
+  .action-btn:hover { background: #1d4ed8; }
+
+  .dict-card {
+    min-width: 0;
+  }
+  .dict-word {
+    font-size: var(--lens-zh-size, 17px);
+    font-weight: 700;
+    color: rgba(20, 24, 32, 0.96);
+    margin-bottom: 6px;
+  }
+  .dict-phonetic {
+    margin-left: 8px;
+    font-size: 12px;
+    font-weight: 400;
+    color: rgba(91, 100, 114, 0.95);
+  }
+  .dict-senses {
+    margin: 0 0 6px;
+    padding-left: 20px;
+    font-size: 13.5px;
+    line-height: 1.55;
+  }
+  .dict-senses li { margin-bottom: 2px; }
+  .dict-pos {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: rgba(37, 99, 235, 0.1);
+    color: #1d4ed8;
+    font-size: 10.5px;
+    font-weight: 700;
+    font-style: italic;
+  }
+  .dict-examples {
+    margin-top: 8px;
+    border-top: 1px solid rgba(15, 23, 42, 0.08);
+    padding-top: 8px;
+  }
+  .dict-example { margin-bottom: 6px; }
+  .dict-example-source {
+    font-size: 12.5px;
+    color: rgba(20, 24, 32, 0.94);
+  }
+  .dict-example-translation {
+    font-size: 12px;
+    color: rgba(91, 100, 114, 0.95);
+  }
+
   .source-outline {
     position: fixed;
     pointer-events: none;
@@ -623,6 +913,13 @@ const LENS_STYLES = `
     }
     .body.muted { color: rgba(168, 176, 189, 0.9); }
     .hint { color: rgba(123, 132, 148, 0.98); }
+    .icon-btn { color: rgba(168, 176, 189, 0.95); }
+    .icon-btn:hover { background: rgba(255, 255, 255, 0.1); }
+    .dict-word { color: rgba(242, 244, 247, 0.96); }
+    .dict-phonetic { color: rgba(168, 176, 189, 0.95); }
+    .dict-example-source { color: rgba(242, 244, 247, 0.96); }
+    .dict-example-translation { color: rgba(168, 176, 189, 0.95); }
+    .dict-examples { border-top-color: rgba(255, 255, 255, 0.08); }
     .source-outline {
       border-color: rgba(77, 142, 240, 0.7);
       box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);

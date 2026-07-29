@@ -144,3 +144,34 @@ describe('apiBaseUrlError', () => {
     expect(apiBaseUrlError('not a url')).toBe('Base URL 格式无效')
   })
 })
+
+describe('mergeSettings feature fields', () => {
+  it('fills feature defaults and validates display mode', () => {
+    const merged = mergeSettings({})
+    expect(merged.inputTranslate).toBe(true)
+    expect(merged.siteRules).toEqual({})
+    expect(merged.pageTranslationDisplayMode).toBe('bilingual')
+
+    expect(mergeSettings({ pageTranslationDisplayMode: 'learning' }).pageTranslationDisplayMode).toBe(
+      'learning',
+    )
+    expect(mergeSettings({ pageTranslationDisplayMode: 'garbage' }).pageTranslationDisplayMode).toBe(
+      'bilingual',
+    )
+    expect(mergeSettings({ inputTranslate: false }).inputTranslate).toBe(false)
+  })
+
+  it('validates site rules: enum values, host keys, bounded count', () => {
+    const merged = mergeSettings({
+      siteRules: {
+        'github.com': { autoPage: 'force-on', engine: 'external' },
+        'bad host/': { autoPage: 'force-on' },
+        'empty.example.com': {},
+        'junk.example.com': { autoPage: 'always', engine: 'chrome' },
+      },
+    })
+    expect(merged.siteRules).toEqual({
+      'github.com': { autoPage: 'force-on', engine: 'external' },
+    })
+  })
+})

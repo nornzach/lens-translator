@@ -1,9 +1,9 @@
 /**
  * Multi-provider OpenAI-compatible adapters.
- * Focus: StepFun + DeepSeek — keep translation fast by disabling/minimizing thinking.
+ * Focus: StepFun + DeepSeek + Alibaba DashScope — keep translation fast by disabling/minimizing thinking.
  */
 
-export type ProviderId = 'auto' | 'openai' | 'deepseek' | 'stepfun'
+export type ProviderId = 'auto' | 'openai' | 'deepseek' | 'stepfun' | 'alibaba'
 
 /** User-facing reasoning preference for translation (default off/lowest). */
 export type ReasoningPref = 'off' | 'low' | 'medium' | 'high'
@@ -43,6 +43,14 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     hostHints: ['stepfun.com', 'stepfun.ai', 'api.stepfun.com', 'api.stepfun.ai'],
     modelHints: ['step-', 'stepfun'],
   },
+  {
+    id: 'alibaba',
+    label: '阿里云百炼 (Qwen)',
+    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    modelHint: 'qwen-plus',
+    hostHints: ['dashscope.aliyuncs.com', 'dashscope', 'aliyuncs.com', 'qianwenai'],
+    modelHints: ['qwen', 'qwq'],
+  },
 ]
 
 export function detectProvider(baseURL: string, model: string): Exclude<ProviderId, 'auto'> {
@@ -65,7 +73,12 @@ export function resolveProvider(
   model: string,
 ): Exclude<ProviderId, 'auto'> {
   if (preferred && preferred !== 'auto' && preferred !== '') {
-    if (preferred === 'deepseek' || preferred === 'stepfun' || preferred === 'openai') {
+    if (
+      preferred === 'deepseek' ||
+      preferred === 'stepfun' ||
+      preferred === 'alibaba' ||
+      preferred === 'openai'
+    ) {
       return preferred
     }
   }
@@ -85,6 +98,7 @@ function safeHost(baseURL: string): string {
  * Mutate chat/completions body with provider-specific flags for speed.
  * - DeepSeek: thinking.type = disabled when pref is off
  * - StepFun: reasoning_effort = low (lowest) when off/low; medium/high as requested
+ * - Alibaba DashScope: enable_thinking = false when off (Qwen3 hybrid-thinking models)
  * Unknown providers: no-op (keep generic OpenAI body)
  */
 export function applyProviderRequestBody(
@@ -115,6 +129,16 @@ export function applyProviderRequestBody(
     } else {
       body.reasoning_effort = 'high'
     }
+    return
+  }
+
+  if (provider === 'alibaba') {
+    // DashScope OpenAI-compatible mode: `enable_thinking` toggles the hybrid
+    // thinking mode (Qwen3 / Qwen3-VL et al.). Not a standard OpenAI field —
+    // official docs pass it as a top-level body param (`extra_body` in SDKs):
+    // https://platform.qianwenai.com/docs/api-reference/chat/openai-chat
+    // Non-off prefs enable thinking and leave budget at the model default.
+    body.enable_thinking = reasoning !== 'off'
     return
   }
 

@@ -3,6 +3,18 @@ import { isPredominantlyTargetLanguage, normalizeText } from '../shared/text'
 
 export type SelectionTranslateRequest = (text: string) => Promise<string | null>
 
+export type SelectionTranslatorActions = {
+  onSpeak?: (text: string) => void
+  onStar?: (source: string, translation: string) => void
+}
+
+/**
+ * Wait for the selection to settle before translating. `selectionchange` fires
+ * for every intermediate range while dragging (and on every Find-in-page jump),
+ * so translating immediately would burn one API request per intermediate text.
+ */
+const SELECTION_SETTLE_MS = 300
+
 /**
  * Temporary popup for selected text. Independent of the lens and full-page mode:
  * enable the toggle → select words → popup; clear selection → hide immediately.
@@ -22,10 +34,17 @@ export class SelectionTranslator {
   private targetLang = 'zh'
   private requestId = 0
   private lastText = ''
+  private lastTranslation = ''
+  private refreshTimer = 0
+  private actionRow: HTMLDivElement
+  private starBtn: HTMLButtonElement
+  private speakBtn: HTMLButtonElement
   private translate: SelectionTranslateRequest
+  private readonly actions: SelectionTranslatorActions
 
-  constructor(translate: SelectionTranslateRequest) {
+  constructor(translate: SelectionTranslateRequest, actions: SelectionTranslatorActions = {}) {
     this.translate = translate
+    this.actions = actions
     this.host = document.createElement('div')
     this.host.id = 'lens-translator-selection-root'
     this.host.setAttribute('data-lens-ignore', '')
@@ -54,7 +73,33 @@ export class SelectionTranslator {
     this.targetBody = document.createElement('div')
     this.targetBody.className = 'target'
 
-    this.panel.append(this.sourceLabel, this.sourceBody, this.targetLabel, this.targetBody)
+    this.actionRow = document.createElement('div')
+    this.actionRow.className = 'actions'
+    this.actionRow.hidden = true
+    this.starBtn = document.createElement('button')
+    this.starBtn.type = 'button'
+    this.starBtn.className = 'icon-btn'
+    this.starBtn.title = '收藏到生词本'
+    this.starBtn.textContent = '☆'
+    this.starBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      if (this.lastText && this.lastTranslation) {
+        this.actions.onStar?.(this.lastText, this.lastTranslation)
+        this.starBtn.textContent = '★'
+      }
+    })
+    this.speakBtn = document.createElement('button')
+    this.speakBtn.type = 'button'
+    this.speakBtn.className = 'icon-btn'
+    this.speakBtn.title = '朗读译文'
+    this.speakBtn.textContent = '🔊'
+    this.speakBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      if (this.lastTranslation) this.actions.onSpeak?.(this.lastTranslation)
+    })
+    this.actionRow.append(this.starBtn, this.speakBtn)
+
+    this.panel.append(this.sourceLabel, this.sourceBody, this.targetLabel, this.targetBody, this.actionRow)
     this.root.append(style, this.panel)
   }
 
@@ -96,8 +141,12 @@ export class SelectionTranslator {
       this.hide()
       return
     }
-    // Defer so mouseup can finish updating the selection range.
-    window.setTimeout(() => void this.refreshFromSelection(), 0)
+    // Debounce: only the settled selection is worth a translation request.
+    window.clearTimeout(this.refreshTimer)
+    this.refreshTimer = window.setTimeout(
+      () => void this.refreshFromSelection(),
+      SELECTION_SETTLE_MS,
+    )
   }
 
   private getSelectedText(): string {
@@ -164,17 +213,24 @@ export class SelectionTranslator {
       const translation = await this.translate(text)
       if (id !== this.requestId || this.getSelectedText() !== text) return
       if (!translation) {
-        this.targetBody.textContent = '翻译失败'
+        // Quiet failure: keep the panel, never surface raw API/setup errors as popups.
+        this.targetBody.classList.add('muted')
+        this.targetBody.classList.remove('pending')
+        this.targetBody.textContent = '暂无法翻译'
         return
       }
       this.targetBody.classList.remove('muted', 'pending')
       this.targetBody.textContent = translation
+      this.lastTranslation = translation
+      this.starBtn.textContent = '☆'
+      this.actionRow.hidden = !this.actions.onSpeak && !this.actions.onStar
       this.place(rect)
-    } catch (error) {
+    } catch {
+      // Selection path must stay non-modal: swallow errors and show a short inline hint.
       if (id !== this.requestId) return
       this.targetBody.classList.add('muted')
       this.targetBody.classList.remove('pending')
-      this.targetBody.textContent = error instanceof Error ? error.message : '翻译失败'
+      this.targetBody.textContent = '暂无法翻译'
     }
   }
 
@@ -199,7 +255,11 @@ export class SelectionTranslator {
   readonly hide = (): void => {
     this.requestId++
     this.lastText = ''
+    this.lastTranslation = ''
+    // A pending debounced refresh must not resurrect the popup after hide.
+    window.clearTimeout(this.refreshTimer)
     this.panel.style.display = 'none'
+    this.actionRow.hidden = true
     this.targetBody.classList.remove('muted', 'pending')
   }
 }
@@ -287,6 +347,24 @@ const STYLES = `
   }
   .target.muted { color: #64748b; font-weight: 400; }
   .target.pending { animation: pulse 1.1s ease-in-out infinite; }
+  .actions {
+    margin-top: 6px;
+    display: flex;
+    gap: 2px;
+    justify-content: flex-end;
+  }
+  .icon-btn {
+    appearance: none;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    padding: 3px 5px;
+    font-size: 13px;
+    line-height: 1;
+    color: #64748b;
+    cursor: pointer;
+  }
+  .icon-btn:hover { background: rgb(15 23 42 / 8%); }
   @keyframes pulse {
     0%, 100% { opacity: 0.55; }
     50% { opacity: 1; }

@@ -1,10 +1,10 @@
-import { splitIntoBatches } from '../shared/batch'
 import type {
   TranslateBatchResultErr,
   TranslateBatchResultOk,
   TranslateBlock,
 } from '../shared/messages'
 import type { UserSettings } from '../shared/settings-defaults'
+import { runWithConcurrency } from '../shared/concurrency'
 import {
   isPageTranslatableText,
   isPredominantlyTargetLanguage,
@@ -29,6 +29,8 @@ import {
 
 const TRANSLATED_ATTR = 'data-lens-page-translated'
 const TRANSLATION_TEXT_ATTR = 'data-lens-page-translation-text'
+const PENDING_ATTR = 'data-lens-page-pending'
+const UI_PENDING_ATTR = 'data-lens-page-ui-pending'
 const UI_TRANSLATION_ATTR = 'data-lens-page-ui-translation'
 const UI_STACKED_TRANSLATION_ATTR = 'data-lens-page-ui-stacked-translation'
 const UI_CONTROL_TRANSLATION_ATTR = 'data-lens-page-ui-control-translation'
@@ -41,10 +43,11 @@ const STATUS_ID = 'lens-translator-page-status'
 const VOLATILE_CHURN_LIMIT = 3
 const VOLATILE_CHURN_WINDOW_MS = 5000
 
-// How many translate-batch requests may be in flight at once for one full-page
-// run. Each maps to a separate background fetch, so this is real HTTP parallelism
-// while staying low enough to avoid provider rate limits.
-const PAGE_TRANSLATION_CONCURRENCY = 4
+// How many per-line translate requests may be in flight at once for one
+// full-page run. Each maps to a separate background fetch, so this is real HTTP
+// parallelism; the background retries 429s with backoff when the provider
+// rate-limits the burst.
+const PAGE_TRANSLATION_CONCURRENCY = 6
 
 // When translation starts before dynamic content has rendered (SPA hydration,
 // async data), keep observing and retrying the initial scan for this long before
@@ -52,9 +55,16 @@ const PAGE_TRANSLATION_CONCURRENCY = 4
 const INITIAL_CONTENT_GRACE_MS = 8000
 const INITIAL_RETRY_INTERVAL_MS = 600
 
+// Failed groups (network blip, provider 5xx) get a bounded automatic retry;
+// without it one transient error leaves parts of the page untranslated until
+// the user toggles manually (attempted-text marks otherwise skip them forever).
+const FAILED_RETRY_MAX = 2
+const FAILED_RETRY_BASE_MS = 2000
+
 type ChurnRecord = { count: number; since: number }
 
-function pageStyles(settings: PageSettings): string {
+/** Exported for snapshot tests of display-mode CSS. */
+export function pageStyles(settings: PageSettings): string {
   const color = settings.pageTranslationUseCustomColor
     ? settings.pageTranslationTextColor
     : 'inherit'
@@ -143,8 +153,76 @@ function pageStyles(settings: PageSettings): string {
   text-decoration-thickness: 2px;
 }
 
+/* Pending LLM translation: shimmer placeholder where the translation will land. */
+@keyframes lens-translator-pending-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+[${PENDING_ATTR}]::after {
+  content: '' !important;
+  display: block !important;
+  box-sizing: border-box !important;
+  margin: 0.24em 0 0.1em !important;
+  width: min(420px, 68%) !important;
+  height: 1.05em !important;
+  border: 0 !important;
+  border-radius: 4px !important;
+  background: linear-gradient(90deg, rgb(148 163 184 / 14%) 25%, rgb(148 163 184 / 32%) 50%, rgb(148 163 184 / 14%) 75%) !important;
+  background-size: 200% 100% !important;
+  animation: lens-translator-pending-shimmer 1.4s linear infinite !important;
+}
+
+[${PENDING_ATTR}][${UI_PENDING_ATTR}]::after {
+  display: inline-block !important;
+  vertical-align: baseline !important;
+  width: 2.8em !important;
+  height: 0.8em !important;
+  margin: 0 0 0 0.32em !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [${PENDING_ATTR}]::after {
+    animation: none !important;
+  }
+}
+
 [${PAGE_ALIGNMENT_FALLBACK_ATTR}] {
   background-color: rgb(250 204 21 / 22%) !important;
+}
+${
+  settings.pageTranslationDisplayMode === 'translation-only'
+    ? `
+/* Translation-only: collapse the original text (font-size cascades; media and
+   explicitly-sized children are unaffected), keep translations readable. */
+[${TRANSLATED_ATTR}] {
+  font-size: 0 !important;
+  letter-spacing: 0 !important;
+}
+[${TRANSLATED_ATTR}]::after,
+[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}]::after,
+[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}][${UI_STACKED_TRANSLATION_ATTR}]::after,
+[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}][${UI_CONTROL_TRANSLATION_ATTR}]::after {
+  font-size: ${settings.pageTranslationFontSizePx}px !important;
+}
+`
+    : ''
+}${
+  settings.pageTranslationDisplayMode === 'learning'
+    ? `
+/* Learning mode: translations stay blurred until hovered — read the original
+   first, peek only when stuck. */
+[${TRANSLATED_ATTR}]::after {
+  filter: blur(5px) !important;
+  opacity: 0.35 !important;
+  transition: filter 0.15s ease, opacity 0.15s ease !important;
+}
+[${TRANSLATED_ATTR}]:hover::after {
+  filter: none !important;
+  opacity: 1 !important;
+}
+`
+    : ''
 }
 
 #${STATUS_ID} {
@@ -184,6 +262,7 @@ type PageSettings = Pick<
   | 'sourceLang'
   | 'targetLang'
   | 'pageTranslationEngine'
+  | 'pageTranslationDisplayMode'
   | 'pageTranslationFontFamily'
   | 'pageTranslationFontSizePx'
   | 'pageTranslationUseCustomColor'
@@ -193,7 +272,6 @@ type PageSettings = Pick<
   | 'pageTranslationBold'
   | 'pageTranslationItalic'
   | 'pageTranslationUnderline'
-  | 'batchCharLimit'
   | 'minTextLength'
 >
 
@@ -336,6 +414,8 @@ export function isPageTranslationCandidate(
   return true
 }
 
+type ScrollAnchor = { el: Element; top: number; at: number }
+
 /** Owns one reversible full-page bilingual translation run. */
 export class PageTranslator {
   private active = false
@@ -343,6 +423,8 @@ export class PageTranslator {
   private statusTimer = 0
   private mutationTimer = 0
   private initialRetryTimer = 0
+  private anchorFrame = 0
+  private pendingAnchor: ScrollAnchor | null = null
   private activationDeadline = 0
   private processingGeneration = 0
   private rescanRequested = false
@@ -351,21 +433,29 @@ export class PageTranslator {
   private currentSettings: PageSettings | null = null
   private readonly dirtyRoots = new Set<ParentNode>()
   private readonly translatedHosts = new Set<Element>()
+  private readonly pendingHosts = new Set<Element>()
   private readonly sourceHosts = new Map<Element, string | null>()
   private attemptedTextByHost = new WeakMap<Element, string>()
   private sourceBlockByHost = new WeakMap<Element, Element>()
   private volatileHosts = new WeakSet<Element>()
   private hostChurn = new WeakMap<Element, ChurnRecord>()
   private readonly translationCache = new Map<string, string>()
+  private retryAttempts = 0
   private processedCount = 0
   private translatedCount = 0
   private totalCount = 0
+  private forceRefresh = false
   private readonly alignment = new PageAlignmentController()
 
   constructor(private readonly browserTranslator: BrowserTranslator) {}
 
   isActive(): boolean {
     return this.active
+  }
+
+  /** Forward a word-star (vocabulary) callback into the alignment controller. */
+  setWordStarHandler(handler: PageAlignmentController['onWordStar']): void {
+    this.alignment.onWordStar = handler
   }
 
   async toggle(settings: PageSettings, externalConfigured: boolean): Promise<void> {
@@ -377,6 +467,9 @@ export class PageTranslator {
   }
 
   deactivate(): void {
+    // Removing every translation at once shrinks the page above the reader;
+    // anchor first so the viewport does not jump.
+    this.scheduleScrollAnchorRestore()
     this.active = false
     this.generation++
     this.observer?.disconnect()
@@ -395,6 +488,11 @@ export class PageTranslator {
       host.removeAttribute(UI_STACKED_TRANSLATION_ATTR)
       host.removeAttribute(UI_CONTROL_TRANSLATION_ATTR)
     }
+    for (const host of this.pendingHosts) {
+      host.removeAttribute(PENDING_ATTR)
+      host.removeAttribute(UI_PENDING_ATTR)
+    }
+    this.pendingHosts.clear()
     for (const [host, previous] of this.sourceHosts) {
       if (previous === null) host.removeAttribute(PAGE_SOURCE_ATTR)
       else host.setAttribute(PAGE_SOURCE_ATTR, previous)
@@ -406,12 +504,23 @@ export class PageTranslator {
     this.volatileHosts = new WeakSet<Element>()
     this.hostChurn = new WeakMap<Element, ChurnRecord>()
     this.translationCache.clear()
+    this.retryAttempts = 0
     this.dirtyRoots.clear()
     this.currentSettings = null
+    this.forceRefresh = false
     this.processingGeneration = 0
     this.rescanRequested = false
     document.getElementById(STATUS_ID)?.remove()
     document.getElementById(STYLE_ID)?.remove()
+  }
+
+  /**
+   * Discard every rendered translation and re-run with fresh LLM results:
+   * all cache layers are bypassed for this run, then overwritten.
+   */
+  async refresh(settings: PageSettings, externalConfigured: boolean): Promise<void> {
+    this.deactivate()
+    await this.activate(settings, externalConfigured, { forceRefresh: true })
   }
 
   /**
@@ -421,13 +530,21 @@ export class PageTranslator {
    */
   restyle(settings: PageSettings): void {
     if (!this.active) return
+    // A stylesheet rewrite resizes every rendered translation at once — the
+    // same mass layout shift as toggling, so anchor the reading position too.
+    this.scheduleScrollAnchorRestore()
     this.currentSettings = settings
     this.ensureStyles(settings)
   }
 
-  async activate(settings: PageSettings, externalConfigured: boolean): Promise<void> {
+  async activate(
+    settings: PageSettings,
+    externalConfigured: boolean,
+    opts?: { forceRefresh?: boolean },
+  ): Promise<void> {
     window.clearTimeout(this.statusTimer)
     this.active = true
+    this.forceRefresh = opts?.forceRefresh === true
     const generation = ++this.generation
     this.currentSettings = settings
     this.ensureStyles(settings)
@@ -436,9 +553,20 @@ export class PageTranslator {
       this.failActivation('整页翻译需要先配置外部 API')
       return
     }
-    if (settings.pageTranslationEngine === 'browser' && !this.browserTranslator.isSupported()) {
-      this.failActivation('当前浏览器不支持 Chrome 内置翻译')
-      return
+    if (settings.pageTranslationEngine === 'browser') {
+      // Probe via offscreen (not page-local Translator) so restricted hosts still work.
+      const availability = await this.browserTranslator.availability(
+        settings.sourceLang,
+        settings.targetLang,
+      )
+      if (availability === 'unsupported') {
+        this.failActivation('当前浏览器不支持 Chrome 内置翻译')
+        return
+      }
+      if (availability === 'unavailable') {
+        this.failActivation('Chrome 内置翻译不支持当前语言对')
+        return
+      }
     }
 
     this.alignment.activate()
@@ -523,27 +651,63 @@ export class PageTranslator {
       }
       this.updateProgress()
 
+      let translateError: string | null = null
       if (unresolved.length) {
-        if (settings.pageTranslationEngine === 'browser') {
-          await this.translateWithBrowser(unresolved, settings, generation)
-        } else {
-          await this.translateWithExternal(unresolved, settings, generation)
+        try {
+          if (settings.pageTranslationEngine === 'browser') {
+            await this.translateWithBrowser(unresolved, settings, generation)
+          } else {
+            await this.translateWithExternal(unresolved, settings, generation)
+          }
+        } catch (error) {
+          // Partial failures fall through to the retry pass below; the error is
+          // still surfaced when this was a total (initial) failure.
+          translateError = error instanceof Error ? error.message : String(error)
         }
       }
       if (!this.isCurrent(generation)) return
 
       if (initial && this.translatedCount === 0 && this.translatedHosts.size === 0) {
-        this.failActivation('整页翻译失败，当前语言对可能不可用')
+        this.failActivation(translateError ?? '整页翻译失败，当前语言对可能不可用')
         return
       }
-      const failed = this.totalCount - this.translatedCount
-      this.showStatus(
-        failed > 0
-          ? `翻译完成：${this.translatedCount} 段成功，${failed} 段失败`
-          : `翻译完成：${this.translatedCount} 段`,
-        failed > 0,
+
+      // Un-mark failed groups and retry with backoff; the attempted-text mark
+      // (set before translating) would otherwise skip them on every future scan.
+      const failedGroups = groups.filter(
+        (group) => !this.translationCache.has(group.representative.text),
       )
-      this.scheduleStatusRemoval()
+      let retryScheduled = false
+      if (failedGroups.length === 0) {
+        this.retryAttempts = 0
+      } else if (this.retryAttempts < FAILED_RETRY_MAX) {
+        this.retryAttempts++
+        for (const group of failedGroups) {
+          for (const block of group.blocks) this.attemptedTextByHost.delete(block.el)
+        }
+        this.dirtyRoots.add(document)
+        this.scheduleScan(FAILED_RETRY_BASE_MS * this.retryAttempts)
+        retryScheduled = true
+      }
+
+      const failed = this.totalCount - this.translatedCount
+      if (retryScheduled) {
+        this.showStatus(
+          `翻译完成：${this.translatedCount} 段，${failed} 段失败，稍后自动重试…`,
+        )
+        this.scheduleStatusRemoval(FAILED_RETRY_BASE_MS * this.retryAttempts + 1500)
+      } else if (failed > 0) {
+        this.showStatus(
+          translateError
+            ? `整页翻译部分失败：${translateError}`
+            : `翻译完成：${this.translatedCount} 段成功，${failed} 段失败`,
+          true,
+        )
+        this.scheduleStatusRemoval(5000)
+      } else {
+        this.showStatus(`翻译完成：${this.translatedCount} 段`)
+        this.scheduleStatusRemoval()
+      }
     } catch (error) {
       if (!this.isCurrent(generation)) return
       const message = error instanceof Error ? error.message : String(error)
@@ -589,52 +753,52 @@ export class PageTranslator {
     settings: PageSettings,
     generation: number,
   ): Promise<void> {
-    const byRepresentativeId = new Map(groups.map((group) => [group.representative.id, group]))
-    const batches = splitIntoBatches(
-      groups.map((group) => group.representative),
-      settings.batchCharLimit,
-      30,
-    )
     const pageKey = makePageKey()
     let firstError: string | null = null
 
-    // Batches run concurrently (bounded) instead of one-at-a-time; every batch is
-    // an independent request keyed by block id, so order does not matter.
-    const runBatch = async (batch: TranslateBlock[]): Promise<void> => {
+    // Every line is its own request. Workers drain the queue in document order
+    // (bounded parallelism), and each line renders the moment its translation
+    // lands instead of waiting for a multi-block batch.
+    this.scheduleScrollAnchorRestore()
+    for (const group of groups) this.markGroupPending(group)
+
+    const runLine = async (group: TranslationGroup): Promise<void> => {
       if (!this.isCurrent(generation)) return
+      let rendered = false
       try {
         const response: unknown = await chrome.runtime.sendMessage({
           type: 'translate-batch',
           pageKey,
-          blocks: batch,
+          blocks: [group.representative],
+          // Resolved before activation ('auto' → real page language); without
+          // this the background guesses 'en' and the prompt lies about the source.
+          sourceLang: settings.sourceLang,
+          targetLang: settings.targetLang,
+          ...(this.forceRefresh ? { forceRefresh: true } : {}),
         })
         if (!this.isCurrent(generation)) return
         if (!isTranslateBatchResult(response)) throw new Error('翻译服务未返回有效结果')
 
-        for (const item of response.translations ?? []) {
-          const group = byRepresentativeId.get(item.id)
-          if (group) {
-            this.renderGroup(group, item.translation, settings)
-          }
+        const item = response.translations?.find((row) => row.id === group.representative.id)
+        if (item) {
+          this.renderGroup(group, item.translation, settings)
+          rendered = true
         }
-        if (!response.ok) {
-          if (firstError === null) firstError = response.error
-        }
+        if (!response.ok && firstError === null) firstError = response.error
       } catch (error) {
         if (firstError === null) {
           firstError = error instanceof Error ? error.message : String(error)
         }
+      } finally {
+        if (!rendered) this.clearGroupPending(group)
       }
 
       if (!this.isCurrent(generation)) return
-      for (const block of batch) {
-        const group = byRepresentativeId.get(block.id)
-        if (group) this.processedCount += group.blocks.length
-      }
+      this.processedCount += group.blocks.length
       this.updateProgress()
     }
 
-    await this.runWithConcurrency(batches, PAGE_TRANSLATION_CONCURRENCY, runBatch)
+    await runWithConcurrency(groups, PAGE_TRANSLATION_CONCURRENCY, runLine)
     if (!this.isCurrent(generation)) return
     // External and on-device engines are intentionally isolated; surface any remaining gap.
     if (firstError !== null && groups.some((g) => !this.translationCache.has(g.representative.text))) {
@@ -642,30 +806,45 @@ export class PageTranslator {
     }
   }
 
-  /** Run `worker` over `items` with at most `limit` in flight; never rejects per item. */
-  private async runWithConcurrency<T>(
-    items: T[],
-    limit: number,
-    worker: (item: T) => Promise<void>,
-  ): Promise<void> {
-    const queue = items.slice()
-    const runNext = async (): Promise<void> => {
-      const item = queue.shift()
-      if (item === undefined) return
-      await worker(item)
-      await runNext()
+  /** The element the translation (and its pending placeholder) attaches to. */
+  private hostForBlock(block: ExtractedBlock): { host: Element; isUi: boolean } {
+    const isUi = isPageUiTranslationCandidate(block)
+    return { isUi, host: isUi ? pageTranslationHost(block) : block.el }
+  }
+
+  private markGroupPending(group: TranslationGroup): void {
+    for (const block of group.blocks) {
+      if (!block.el.isConnected) continue
+      const { host, isUi } = this.hostForBlock(block)
+      if (this.translatedHosts.has(host)) continue
+      host.setAttribute(PENDING_ATTR, '')
+      if (isUi) host.setAttribute(UI_PENDING_ATTR, '')
+      this.pendingHosts.add(host)
     }
-    const runners: Promise<void>[] = []
-    for (let i = 0; i < Math.min(limit, items.length); i++) runners.push(runNext())
-    await Promise.all(runners)
+  }
+
+  private clearHostPending(host: Element): void {
+    if (!this.pendingHosts.delete(host)) return
+    host.removeAttribute(PENDING_ATTR)
+    host.removeAttribute(UI_PENDING_ATTR)
+  }
+
+  private clearGroupPending(group: TranslationGroup): void {
+    for (const block of group.blocks) {
+      if (!block.el.isConnected) continue
+      this.clearHostPending(this.hostForBlock(block).host)
+    }
   }
 
   private renderGroup(group: TranslationGroup, translation: string, settings: PageSettings): void {
+    // Appended block translations push everything below them down; anchor the
+    // reading position before mutating so streamed renders do not drift the page.
+    this.scheduleScrollAnchorRestore()
     this.translationCache.set(group.representative.text, translation)
     for (const block of group.blocks) {
       if (!block.el.isConnected) continue
-      const isUi = isPageUiTranslationCandidate(block)
-      const host = isUi ? pageTranslationHost(block) : block.el
+      const { host, isUi } = this.hostForBlock(block)
+      this.clearHostPending(host)
       if (this.translatedHosts.has(host)) continue
       if (!this.sourceHosts.has(host)) {
         this.sourceHosts.set(host, host.getAttribute(PAGE_SOURCE_ATTR))
@@ -731,6 +910,25 @@ export class PageTranslator {
           ? (record.target as Element)
           : record.target.parentElement
       if (!target || target.closest('[data-lens-ignore]')) continue
+
+      // Class/style flips on <html>/<body> (SPA theming, scroll-state classes)
+      // carry no new text — treating them as dirty roots forces a full-document
+      // rescan on every toggle.
+      if (
+        record.type === 'attributes' &&
+        (target === document.body || target === document.documentElement) &&
+        (record.attributeName === 'class' || record.attributeName === 'style')
+      ) {
+        continue
+      }
+
+      // Typing inside editors is never extracted, so rescanning on it is pure waste.
+      if (
+        record.type === 'characterData' &&
+        target.closest('[contenteditable]:not([contenteditable="false"]), textarea, input')
+      ) {
+        continue
+      }
 
       if (record.type === 'childList') {
         const changed = [...record.addedNodes, ...record.removedNodes]
@@ -804,6 +1002,9 @@ export class PageTranslator {
       if (host.isConnected) continue
       this.invalidateHost(host)
     }
+    for (const host of this.pendingHosts) {
+      if (!host.isConnected) this.clearHostPending(host)
+    }
   }
 
   private scheduleScan(delay = 250): void {
@@ -824,6 +1025,70 @@ export class PageTranslator {
 
   private isCurrent(generation: number): boolean {
     return this.active && generation === this.generation
+  }
+
+  /**
+   * Translations render as block-level ::after content, so every render batch and
+   * the final teardown shift all content below them. Chrome's native scroll
+   * anchoring is suppressed when many nodes change at once, so re-measure the
+   * reader's anchor after the frame and cancel the drift ourselves. If native
+   * anchoring already compensated, the measured delta is 0 and we stay idle.
+   */
+  private scheduleScrollAnchorRestore(): void {
+    // rAF never fires in a hidden tab — a stale anchor captured minutes ago must
+    // not be reused on the next visible run.
+    if (!this.pendingAnchor || Date.now() - this.pendingAnchor.at > 1000) {
+      this.pendingAnchor = this.captureScrollAnchor()
+    }
+    if (!this.pendingAnchor || this.anchorFrame) return
+    this.anchorFrame = window.requestAnimationFrame(() => {
+      this.anchorFrame = 0
+      const anchor = this.pendingAnchor
+      this.pendingAnchor = null
+      // Hidden tabs fire rAF only when re-shown — a stale anchor would apply a
+      // bogus jump long after the mutations happened.
+      if (!anchor || !anchor.el.isConnected || Date.now() - anchor.at > 1000) return
+      const delta = anchor.el.getBoundingClientRect().top - anchor.top
+      if (Math.abs(delta) <= 1) return
+      const container = this.scrollContainerOf(anchor.el)
+      if (container) container.scrollBy({ top: delta, left: 0, behavior: 'instant' })
+      else window.scrollBy({ top: delta, left: 0, behavior: 'instant' })
+    })
+  }
+
+  /** Topmost non-fixed content element — a proxy for what the user is reading. */
+  private captureScrollAnchor(): ScrollAnchor | null {
+    if (typeof document.elementsFromPoint !== 'function') return null
+    const x = Math.round(window.innerWidth / 2)
+    const maxY = Math.min(window.innerHeight, 480)
+    for (let y = 1; y <= maxY; y += 24) {
+      for (const el of document.elementsFromPoint(x, y)) {
+        if (el === document.body || el === document.documentElement) continue
+        if (el.closest('[data-lens-ignore]')) continue
+        // Fixed/stuck-sticky elements do not move when content above them
+        // grows, so they cannot measure layout drift.
+        const position = window.getComputedStyle(el).position
+        if (position === 'fixed' || position === 'sticky') continue
+        return { el, top: el.getBoundingClientRect().top, at: Date.now() }
+      }
+    }
+    return null
+  }
+
+  /** Sites like Gmail scroll an inner panel, not the document — compensate there. */
+  private scrollContainerOf(el: Element): Element | null {
+    let node = el.parentElement
+    while (node && node !== document.body) {
+      const style = window.getComputedStyle(node)
+      if (
+        /(auto|scroll|overlay)/.test(style.overflowY) &&
+        node.scrollHeight > node.clientHeight
+      ) {
+        return node
+      }
+      node = node.parentElement
+    }
+    return null
   }
 
   private ensureStyles(settings: PageSettings): void {

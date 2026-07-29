@@ -29,7 +29,7 @@ const ENGLISH_MARKERS = new Set([
   'you',
 ])
 
-function primaryLanguage(language: string): string {
+export function primaryLanguage(language: string): string {
   return language.trim().toLocaleLowerCase().split(/[-_]/u)[0]
 }
 

@@ -433,3 +433,82 @@ describe('dedupeNestedBlocks', () => {
     expect(out.some((b) => b.id === 'p1')).toBe(false)
   })
 })
+
+describe('extractEditableTarget', () => {
+  function editableHost(
+    tag: string,
+    opts: {
+      value?: string
+      type?: string
+      disabled?: boolean
+      readOnly?: boolean
+      contentEditable?: boolean
+      textContent?: string
+    },
+  ): Element {
+    const host = {
+      tagName: tag.toUpperCase(),
+      value: opts.value ?? '',
+      type: opts.type ?? '',
+      disabled: Boolean(opts.disabled),
+      readOnly: Boolean(opts.readOnly),
+      isContentEditable: Boolean(opts.contentEditable),
+      textContent: opts.textContent ?? '',
+      closest: (selector: string) => {
+        if (selector.includes('[data-lens-ignore]')) return null
+        if (
+          selector.includes('textarea') ||
+          selector.includes('input') ||
+          selector.includes('contenteditable')
+        ) {
+          return host
+        }
+        return null
+      },
+    }
+    return host as unknown as Element
+  }
+
+  it('reads textarea and plain-text input values with writability', async () => {
+    const { extractEditableTarget } = await import('../../src/content/extract')
+
+    const textarea = extractEditableTarget(
+      editableHost('textarea', { value: '  你好，世界  ' }),
+    )
+    expect(textarea).toMatchObject({ kind: 'textarea', text: '你好，世界', writable: true })
+
+    const input = extractEditableTarget(editableHost('input', { value: 'hello', type: 'text' }))
+    expect(input).toMatchObject({ kind: 'input', text: 'hello', writable: true })
+
+    const locked = extractEditableTarget(
+      editableHost('textarea', { value: 'locked', readOnly: true }),
+    )
+    expect(locked).toMatchObject({ writable: false })
+  })
+
+  it('skips non-text inputs, empty values and non-editables', async () => {
+    const { extractEditableTarget } = await import('../../src/content/extract')
+
+    expect(
+      extractEditableTarget(editableHost('input', { value: 'secret', type: 'password' })),
+    ).toBeNull()
+    expect(extractEditableTarget(editableHost('textarea', { value: '   ' }))).toBeNull()
+
+    const div = editableHost('div', {})
+    ;(div as { closest: unknown }).closest = () => null
+    expect(extractEditableTarget(div)).toBeNull()
+  })
+
+  it('reads contenteditable text', async () => {
+    const { extractEditableTarget } = await import('../../src/content/extract')
+    const host = editableHost('div', {
+      contentEditable: true,
+      textContent: '  draft message  ',
+    })
+    expect(extractEditableTarget(host)).toMatchObject({
+      kind: 'contenteditable',
+      text: 'draft message',
+      writable: true,
+    })
+  })
+})
