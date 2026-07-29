@@ -72,6 +72,8 @@ export type UserSettings = {
   prefetchMarginRatio: number // 0.5 = half viewport
   hotkey: HotkeyConfig
   pageTranslationHotkey: HotkeyConfig
+  /** Region screenshot translation hotkey (tap to start, again/Esc to cancel). */
+  shotTranslateHotkey: HotkeyConfig
   pausedHostnames: string[]
 }
 
@@ -121,6 +123,13 @@ export const DEFAULT_SETTINGS: UserSettings = {
     ctrlKey: false,
     metaKey: false,
     code: 'Semicolon',
+  },
+  shotTranslateHotkey: {
+    altKey: true,
+    shiftKey: true,
+    ctrlKey: false,
+    metaKey: false,
+    code: 'KeyS',
   },
   pausedHostnames: [],
 }
@@ -305,6 +314,10 @@ export function mergeSettings(partial: unknown): UserSettings {
     pageTranslationHotkey: hotkeyValue(
       p.pageTranslationHotkey,
       DEFAULT_SETTINGS.pageTranslationHotkey,
+    ),
+    shotTranslateHotkey: hotkeyValue(
+      p.shotTranslateHotkey,
+      DEFAULT_SETTINGS.shotTranslateHotkey,
     ),
     pausedHostnames: Array.isArray(p.pausedHostnames)
       ? p.pausedHostnames

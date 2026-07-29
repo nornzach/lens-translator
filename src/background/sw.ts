@@ -21,6 +21,7 @@ import {
   persistTranslationCache,
 } from './translate'
 import { handleBrowserTranslatorRequest, handleCloseTranslatorHost } from './browser-translate'
+import { translateShotRegion } from './shot'
 
 const CONTEXT_PANEL = 'open-control-panel'
 const CONTEXT_OPTIONS = 'open-options'
@@ -52,6 +53,9 @@ function errorResponse(message: ToBackground, error: unknown): FromBackground {
   }
   if (message.type === 'translate-image') {
     return { type: 'translate-image-result', ok: false, error: detail }
+  }
+  if (message.type === 'translate-shot') {
+    return { type: 'translate-shot-result', ok: false, error: detail }
   }
   if (message.type === 'test-connection') {
     return { type: 'test-connection-result', ok: false, error: detail }
@@ -349,6 +353,7 @@ function settingsForContent(settings: UserSettings, hostname = ''): SettingsMsg 
     prefetchMarginRatio,
     hotkey,
     pageTranslationHotkey,
+    shotTranslateHotkey,
   } = settings
 
   // Per-host rules are resolved here, at the trusted boundary, so content
@@ -392,6 +397,7 @@ function settingsForContent(settings: UserSettings, hostname = ''): SettingsMsg 
       prefetchMarginRatio,
       hotkey,
       pageTranslationHotkey,
+      shotTranslateHotkey,
       apiKey: '',
     },
     paused: hostname ? settings.pausedHostnames.includes(hostname) : false,
@@ -447,6 +453,28 @@ function isToBackground(value: unknown): value is ToBackground {
       typeof value.imageUrl === 'string' &&
       value.imageUrl.length > 0 &&
       value.imageUrl.length <= 5_500_000
+    )
+  }
+  if (value.type === 'translate-shot') {
+    const rect = value.rect
+    return (
+      isRecord(rect) &&
+      typeof rect.x === 'number' &&
+      Number.isFinite(rect.x) &&
+      Math.abs(rect.x) <= 100_000 &&
+      typeof rect.y === 'number' &&
+      Number.isFinite(rect.y) &&
+      Math.abs(rect.y) <= 100_000 &&
+      typeof rect.width === 'number' &&
+      rect.width > 0 &&
+      rect.width <= 100_000 &&
+      typeof rect.height === 'number' &&
+      rect.height > 0 &&
+      rect.height <= 100_000 &&
+      (value.devicePixelRatio === undefined ||
+        (typeof value.devicePixelRatio === 'number' &&
+          value.devicePixelRatio > 0 &&
+          value.devicePixelRatio <= 32))
     )
   }
   if (value.type === 'translate-batch') {
@@ -601,6 +629,26 @@ async function handle(
     return result.ok
       ? { type: 'translate-image-result', ok: true, translation: result.translation }
       : { type: 'translate-image-result', ok: false, error: result.error }
+  }
+
+  if (message.type === 'translate-shot') {
+    const settings = await loadSettings()
+    if (!isConfigured(settings)) {
+      return {
+        type: 'translate-shot-result',
+        ok: false,
+        error: '截图翻译需要外部多模态模型：请先配置 Base URL、API Key 与支持 image 的模型',
+      }
+    }
+    const result = await translateShotRegion(
+      message.rect,
+      message.devicePixelRatio ?? 1,
+      sender.tab?.windowId,
+      settings,
+    )
+    return result.ok
+      ? { type: 'translate-shot-result', ok: true, translation: result.translation, image: result.image }
+      : { type: 'translate-shot-result', ok: false, error: result.error }
   }
 
   if (message.type === 'tts-speak') {

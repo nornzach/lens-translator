@@ -154,8 +154,11 @@ function updateHotkeyHelp(): void {
   const pageLabel = formatHotkeyLabel(
     readHotkeyFromHidden('pageHotkey', DEFAULT_SETTINGS.pageTranslationHotkey),
   )
+  const shotLabel = formatHotkeyLabel(
+    readHotkeyFromHidden('shotHotkey', DEFAULT_SETTINGS.shotTranslateHotkey),
+  )
   el<HTMLElement>('helpHotkey').textContent =
-    `按住 ${lensLabel} 临时显示透镜；短按保持打开。${pageLabel} 切换整页双语翻译。`
+    `按住 ${lensLabel} 临时显示透镜；短按保持打开。${pageLabel} 切换整页双语翻译。${shotLabel} 框选截图翻译。`
 }
 
 function fillForm(s: UserSettings): void {
@@ -195,6 +198,7 @@ function fillForm(s: UserSettings): void {
   el<HTMLInputElement>('lensWidthPx').value = String(s.lensWidthPx)
   writeHotkeyHidden('hotkey', s.hotkey)
   writeHotkeyHidden('pageHotkey', s.pageTranslationHotkey)
+  writeHotkeyHidden('shotHotkey', s.shotTranslateHotkey)
   updateHotkeyHelp()
   el<HTMLInputElement>('pausedHostnames').value = s.pausedHostnames.join(', ')
   updateConfigBadge(s)
@@ -247,6 +251,10 @@ function readForm(stored: UserSettings): UserSettings {
     pageTranslationHotkey: readHotkeyFromHidden(
       'pageHotkey',
       DEFAULT_SETTINGS.pageTranslationHotkey,
+    ),
+    shotTranslateHotkey: readHotkeyFromHidden(
+      'shotHotkey',
+      DEFAULT_SETTINGS.shotTranslateHotkey,
     ),
     pausedHostnames: parsePausedHostnames(el<HTMLInputElement>('pausedHostnames').value),
   }
@@ -976,6 +984,7 @@ async function init(): Promise<void> {
   setupSectionNavigation()
   setupHotkeyCapture('hotkey', 'captureHotkey', 'captureHint')
   setupHotkeyCapture('pageHotkey', 'capturePageHotkey', 'capturePageHint')
+  setupHotkeyCapture('shotHotkey', 'captureShotHotkey', 'captureShotHint')
   setupOnboarding(
     () => stored,
     (s) => {
@@ -1036,8 +1045,12 @@ async function init(): Promise<void> {
     runSafe(async () => {
       try {
         const next = readForm(stored)
-        if (hotkeysEqual(next.hotkey, next.pageTranslationHotkey)) {
-          setStatus('翻译透镜与整页翻译不能使用同一个快捷键', false)
+        if (
+          hotkeysEqual(next.hotkey, next.pageTranslationHotkey) ||
+          hotkeysEqual(next.hotkey, next.shotTranslateHotkey) ||
+          hotkeysEqual(next.pageTranslationHotkey, next.shotTranslateHotkey)
+        ) {
+          setStatus('透镜、整页与截图三个快捷键不能相同', false)
           return
         }
         const usesExternal =

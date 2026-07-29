@@ -351,6 +351,23 @@
               <input type="hidden" id="pageHotkeyMeta" />
               <input type="hidden" id="pageHotkeyCode" />
             </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <h3>截图翻译快捷键</h3>
+                <p>按下后拖动框选区域；再次按下或按 Esc 取消框选。</p>
+              </div>
+              <div class="control hotkey-control">
+                <kbd id="shotHotkeyPreview">Option+Shift+S</kbd>
+                <button type="button" id="captureShotHotkey" class="button secondary">录制</button>
+                <span id="captureShotHint" class="capture-hint" hidden>请按下组合键，Esc 取消</span>
+              </div>
+              <input type="hidden" id="shotHotkeyAlt" />
+              <input type="hidden" id="shotHotkeyShift" />
+              <input type="hidden" id="shotHotkeyCtrl" />
+              <input type="hidden" id="shotHotkeyMeta" />
+              <input type="hidden" id="shotHotkeyCode" />
+            </div>
           </section>
 
           <section id="browser-runtime" class="settings-section">

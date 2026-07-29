@@ -173,12 +173,39 @@ describe('pageStyles display modes', () => {
     expect(css).not.toContain('blur')
   })
 
-  it('translation-only collapses hosts but keeps ::after at absolute size', async () => {
+  it('translation-only hides originals without collapsing layout', async () => {
     const { pageStyles } = await import('../../src/content/page-translator')
     const css = pageStyles({ ...base, pageTranslationDisplayMode: 'translation-only' })
-    expect(css).toContain('font-size: 0 !important')
-    // UI ::after variants use em sizes — mode must force absolute px everywhere.
-    expect(css).toContain('font-size: 14px !important')
+    // No font-size collapse: transparent glyphs keep every box's metrics.
+    expect(css).not.toContain('font-size: 0 !important')
+    expect(css).toContain('color: transparent !important')
+    expect(css).toContain('text-shadow: none !important')
+    // Default size: block translations inherit the host's own size (hierarchy survives).
+    expect(css).toContain('font-size: 1em !important')
+    // Translations must not inherit the transparent host color.
+    expect(css).toContain('color: var(--lens-page-body-color, #172033) !important')
+  })
+
+  it('translation-only honors an explicit custom font size', async () => {
+    const { pageStyles } = await import('../../src/content/page-translator')
+    const css = pageStyles({
+      ...base,
+      pageTranslationDisplayMode: 'translation-only',
+      pageTranslationFontSizePx: 18,
+    })
+    expect(css).toContain('color: transparent !important')
+    expect(css).toContain('font-size: 18px !important')
+  })
+
+  it('translation-only uses the custom translation color when configured', async () => {
+    const { pageStyles } = await import('../../src/content/page-translator')
+    const css = pageStyles({
+      ...base,
+      pageTranslationDisplayMode: 'translation-only',
+      pageTranslationUseCustomColor: true,
+    })
+    expect(css).toContain('color: #0e7490 !important')
+    expect(css).not.toContain('var(--lens-page-body-color')
   })
 
   it('renders a shimmer placeholder at pending translation positions', async () => {

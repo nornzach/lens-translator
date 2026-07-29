@@ -199,6 +199,11 @@ select {
   min-height: 44px;
 }
 
+#shotTranslate {
+  grid-column: 1 / -1;
+  min-height: 44px;
+}
+
 .action-button {
   min-width: 0;
   min-height: 60px;

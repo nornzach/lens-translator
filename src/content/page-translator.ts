@@ -4,6 +4,7 @@ import type {
   TranslateBlock,
 } from '../shared/messages'
 import type { UserSettings } from '../shared/settings-defaults'
+import { DEFAULT_SETTINGS } from '../shared/settings-defaults'
 import { runWithConcurrency } from '../shared/concurrency'
 import {
   isPageTranslatableText,
@@ -75,6 +76,16 @@ export function pageStyles(settings: PageSettings): string {
   const radius = settings.pageTranslationUseBackground ? '4px' : '0'
   const opacity =
     settings.pageTranslationUseCustomColor || settings.pageTranslationUseBackground ? '1' : '0.78'
+  // Translation-only blocks default to the host's own size; explicit size wins.
+  const blockFontSize =
+    settings.pageTranslationFontSizePx === DEFAULT_SETTINGS.pageTranslationFontSizePx
+      ? '1em'
+      : `${settings.pageTranslationFontSizePx}px`
+  // ::after can't inherit from a transparent host — fall back to the runtime
+  // body color var unless the user picked an explicit translation color.
+  const translationOnlyColor = settings.pageTranslationUseCustomColor
+    ? settings.pageTranslationTextColor
+    : 'var(--lens-page-body-color, #172033)'
   const fontFamily = {
     system: 'inherit',
     sans: 'Inter, ui-sans-serif, system-ui, sans-serif',
@@ -193,17 +204,40 @@ export function pageStyles(settings: PageSettings): string {
 ${
   settings.pageTranslationDisplayMode === 'translation-only'
     ? `
-/* Translation-only: collapse the original text (font-size cascades; media and
-   explicitly-sized children are unaffected), keep translations readable. */
-[${TRANSLATED_ATTR}] {
-  font-size: 0 !important;
-  letter-spacing: 0 !important;
+/* Translation-only, two host classes:
+   - Block hosts: visibility hides glyphs AND inline-chip backgrounds/borders
+     (code pills, search kbd) while keeping every box's geometry — no holes,
+     no collapse. ::after opts back into visibility, and since the host keeps
+     its real color, inherit still follows the page theme.
+   - UI hosts (buttons, nav): the control's own box must survive, so only the
+     label text goes transparent; ::after needs an explicit color because
+     inherit would follow the transparent label. */
+[${TRANSLATED_ATTR}]:not([${UI_TRANSLATION_ATTR}]) {
+  visibility: hidden !important;
 }
-[${TRANSLATED_ATTR}]::after,
+[${TRANSLATED_ATTR}]:not([${UI_TRANSLATION_ATTR}])::after {
+  visibility: visible !important;
+}
+/* Interactive controls and media inside translated blocks stay usable. */
+[${TRANSLATED_ATTR}]:not([${UI_TRANSLATION_ATTR}]) :is(input, textarea, select, video, audio, canvas, iframe, img, svg) {
+  visibility: visible !important;
+}
+[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}],
+[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}] *:not([data-lens-ignore]):not([data-lens-ignore] *) {
+  color: transparent !important;
+  text-shadow: none !important;
+}
+/* Block translations default to the host's own size so the headline/body
+   hierarchy survives; an explicit custom font size always wins. */
+[${TRANSLATED_ATTR}]::after {
+  font-size: ${blockFontSize} !important;
+}
+/* Compact UI labels keep the configured absolute size and an explicit color. */
 [${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}]::after,
 [${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}][${UI_STACKED_TRANSLATION_ATTR}]::after,
 [${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}][${UI_CONTROL_TRANSLATION_ATTR}]::after {
   font-size: ${settings.pageTranslationFontSizePx}px !important;
+  color: ${translationOnlyColor} !important;
 }
 `
     : ''
@@ -1098,6 +1132,13 @@ export class PageTranslator {
       style.id = STYLE_ID
       style.setAttribute('data-lens-ignore', '')
       ;(document.head ?? document.documentElement).append(style)
+    }
+    // Body's real text color feeds translation-only ::after (see pageStyles).
+    try {
+      const bodyColor = getComputedStyle(document.body ?? document.documentElement).color
+      if (bodyColor) document.documentElement.style.setProperty('--lens-page-body-color', bodyColor)
+    } catch {
+      // Keep the stylesheet's safe fallback.
     }
     style.textContent = pageStyles(settings)
   }

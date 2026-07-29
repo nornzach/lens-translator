@@ -5,7 +5,7 @@ export default defineManifest({
   name: 'Lens Translator',
   description:
     'On-demand translation lens, selection popup, and bilingual page mode — Chrome built-in or your LLM.',
-  version: '0.5.0',
+  version: '0.6.0',
   action: {
     // No default_popup: click toggles sticky lens. Right-click for panel/settings.
     default_title: 'Lens Translator — 点击开关透镜',
@@ -30,7 +30,9 @@ export default defineManifest({
   // Translator is blocked (Gmail Permissions-Policy, etc.).
   // tts: read source/translation aloud from the lens & selection panels.
   permissions: ['storage', 'tabs', 'scripting', 'contextMenus', 'notifications', 'windows', 'tts'],
-  host_permissions: ['http://*/*', 'https://*/*'],
+  // <all_urls>: captureVisibleTab (region screenshot translation) requires the
+  // literal all-URLs host permission — http/https patterns do not satisfy it.
+  host_permissions: ['<all_urls>'],
   web_accessible_resources: [
     {
       resources: ['src/bubble/index.html', 'src/popup/index.html'],

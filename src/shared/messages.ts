@@ -25,6 +25,17 @@ export type TranslateImageRequestMsg = {
   imageUrl: string
 }
 
+/** Region screenshot translation: content captures a CSS-px rect, SW crops + OCR-translates. */
+export type TranslateShotMsg = {
+  type: 'translate-shot'
+  rect: { x: number; y: number; width: number; height: number }
+  devicePixelRatio?: number
+}
+
+export type TranslateShotResult =
+  | { type: 'translate-shot-result'; ok: true; translation: string; image: string }
+  | { type: 'translate-shot-result'; ok: false; error: string }
+
 export type TranslateImageResultOk = {
   type: 'translate-image-result'
   ok: true
@@ -80,6 +91,7 @@ export type ContentSettings = Pick<
   | 'prefetchMarginRatio'
   | 'hotkey'
   | 'pageTranslationHotkey'
+  | 'shotTranslateHotkey'
 > & { apiKey: '' }
 
 /** Effective per-host rule after SW resolution (null = follow global settings). */
@@ -138,7 +150,7 @@ export type ToggleLensResult =
 
 export type BubbleControlMsg = {
   type: 'bubble-control'
-  command: 'get-state' | 'toggle-page-translation' | 'toggle-lens' | 'retranslate-page'
+  command: 'get-state' | 'toggle-page-translation' | 'toggle-lens' | 'retranslate-page' | 'shot-translate'
 }
 
 export type TestVisionMsg = {
@@ -323,6 +335,7 @@ export type TranslateDictResult =
 export type ToBackground =
   | TranslateBatchRequestMsg
   | TranslateImageRequestMsg
+  | TranslateShotMsg
   | GetSettingsMsg
   | PauseHostnameMsg
   | OpenOptionsMsg
@@ -341,6 +354,7 @@ export type FromBackground =
   | TranslateBatchResultErr
   | TranslateImageResultOk
   | TranslateImageResultErr
+  | TranslateShotResult
   | SettingsMsg
   | TestConnectionResult
   | TestVisionResult

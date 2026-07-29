@@ -2,6 +2,7 @@ import {
   Activity,
   Bot,
   ChevronDown,
+  Crop,
   Focus,
   KeyRound,
   Languages,
@@ -34,6 +35,7 @@ const iconNodes: Record<string, IconNode> = {
   activity: Activity,
   bot: Bot,
   chevron: ChevronDown,
+  crop: Crop,
   focus: Focus,
   key: KeyRound,
   languages: Languages,
@@ -352,8 +354,18 @@ async function init(): Promise<void> {
   })
   el<HTMLButtonElement>('pageRefresh').addEventListener('click', async () => {
     try {
-      renderControlState(await sendControl('retranslate-page'))
-      showStatus('正在忽略缓存重新翻译本页…')
+      const result = await sendControl('retranslate-page')
+      renderControlState(result)
+      if (result.ok) showStatus('正在忽略缓存重新翻译本页…')
+    } catch (error) {
+      showStatus(error instanceof Error ? error.message : String(error), true)
+    }
+  })
+  el<HTMLButtonElement>('shotTranslate').addEventListener('click', async () => {
+    try {
+      const result = await sendControl('shot-translate')
+      renderControlState(result)
+      if (result.ok) showStatus('在页面上拖动框选要翻译的区域')
     } catch (error) {
       showStatus(error instanceof Error ? error.message : String(error), true)
     }

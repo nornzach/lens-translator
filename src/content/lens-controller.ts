@@ -45,6 +45,7 @@ import {
 import { addVocabularyEntry, vocabularyKey } from '../shared/vocabulary'
 import type { DictionaryEntry } from '../shared/schema'
 import { SelectionTranslator } from './selection-translator'
+import { ShotTranslator, type ShotTranslateResult } from './shot-translator'
 import { SetupPrompt } from './setup-prompt'
 
 const TAP_STICKY_MS = 320
@@ -175,6 +176,10 @@ export class LensController {
   private readonly batcher: TranslationBatcher
   private readonly setupPrompt = new SetupPrompt()
   private readonly selectionTranslator: SelectionTranslator
+  private readonly shotTranslator = new ShotTranslator(
+    (rect, dpr) => this.translateShot(rect, dpr),
+    (selecting) => this.onBubbleVisibility?.(!selecting && this.bubbleVisibleNow()),
+  )
 
   // --- settings state ---
   settings: UserSettings = DEFAULT_SETTINGS
@@ -764,6 +769,23 @@ export class LensController {
       e.preventDefault()
       e.stopPropagation()
       void this.togglePageTranslation()
+      return
+    }
+    if (matchesHotkey(e, this.settings.shotTranslateHotkey)) {
+      if (e.repeat) {
+        e.preventDefault()
+        return
+      }
+      e.preventDefault()
+      e.stopPropagation()
+      if (this.shotTranslator.isSelecting()) {
+        this.shotTranslator.cancel()
+        return
+      }
+      const result = this.startShotTranslate()
+      if (!result.ok && !this.configured) {
+        this.showEngineSetupPrompt({ kind: 'external-unconfigured' })
+      }
       return
     }
     if (!matchesHotkey(e, this.settings.hotkey)) return
@@ -1654,8 +1676,58 @@ export class LensController {
       const result = await this.retranslatePage()
       return result.ok ? this.bubbleState() : result
     }
+    if (message.command === 'shot-translate') {
+      const result = this.startShotTranslate()
+      return result.ok ? this.bubbleState() : result
+    }
     const result = await this.togglePageTranslation()
     return result.ok ? this.bubbleState() : result
+  }
+
+  /** Bubble “截图翻译”: region-select overlay; the SW crops + OCR-translates. */
+  private startShotTranslate(): TogglePageTranslationResult {
+    if (this.pausedHere) return { ok: false, error: '当前网站已暂停翻译' }
+    if (!this.configured) {
+      return { ok: false, error: '截图翻译需要外部多模态模型：请先完成配置' }
+    }
+    if (this.lensActive) this.deactivateLens()
+    this.shotTranslator.start()
+    return { ok: true }
+  }
+
+  /** Current bubble visibility per settings/pause — restored after a shot. */
+  private bubbleVisibleNow(): boolean {
+    return this.settings.showFloatingBubble !== false && !this.pausedHere
+  }
+
+  private async translateShot(
+    rect: { x: number; y: number; width: number; height: number },
+    devicePixelRatio: number,
+  ): Promise<ShotTranslateResult> {
+    const response: unknown = await chrome.runtime.sendMessage({
+      type: 'translate-shot',
+      rect,
+      devicePixelRatio,
+    })
+    if (
+      response &&
+      typeof response === 'object' &&
+      'type' in response &&
+      response.type === 'translate-shot-result' &&
+      'ok' in response
+    ) {
+      if (response.ok === true && 'translation' in response && 'image' in response) {
+        return {
+          ok: true,
+          translation: String(response.translation),
+          image: String(response.image),
+        }
+      }
+      if (response.ok === false && 'error' in response) {
+        return { ok: false, error: String(response.error) }
+      }
+    }
+    return { ok: false, error: '翻译服务未返回有效结果' }
   }
 
   /** Bubble “重新翻译”: rerun full-page translation with caches bypassed. */
@@ -1708,7 +1780,8 @@ function isBubbleControlMessage(value: object): value is BubbleControlMsg {
     value.command === 'get-state' ||
     value.command === 'toggle-page-translation' ||
     value.command === 'toggle-lens' ||
-    value.command === 'retranslate-page'
+    value.command === 'retranslate-page' ||
+    value.command === 'shot-translate'
   )
 }
 
