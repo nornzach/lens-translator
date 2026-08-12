@@ -361,6 +361,15 @@ export class PageAlignmentController {
       return
     }
 
+    // Overlay-rendered hosts (virtualized feeds) paint translations via a
+    // floating div instead of ::after, so getComputedStyle(host, '::after')
+    // returns empty values. Word-level alignment is not supported there —
+    // degrade gracefully instead of rendering an invisible zero-size overlay.
+    if (host.hasAttribute('data-lens-page-render')) {
+      this.clearInteraction()
+      return
+    }
+
     // Layout reads are cached per host — moving within one translated block no
     // longer forces Range/computed-style work on every frame. A cheap rect-top
     // check detects the host drifting (streamed translations above pushing it).
