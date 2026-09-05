@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { parseImageTranslationResult, parseTranslateBatchResult } from '../../src/shared/schema'
+import {
+  buildTranslateUserPrompt,
+  parseImageTranslationResult,
+  parseTranslateBatchResult,
+} from '../../src/shared/schema'
 
 describe('parseTranslateBatchResult', () => {
   it('keeps only allowed ids', () => {
@@ -25,6 +29,22 @@ describe('parseTranslateBatchResult', () => {
   it('fails when items missing', () => {
     const parsed = parseTranslateBatchResult({}, new Set())
     expect(parsed.ok).toBe(false)
+  })
+})
+
+describe('buildTranslateUserPrompt', () => {
+  it('requires prose translation while preserving literal technical tokens', () => {
+    const source =
+      'Use --attention-backend triton when 128GB unified memory is shared with the host CPU.'
+    const prompt = buildTranslateUserPrompt('en', 'zh', [
+      { id: 'technical', tag: 'li', text: source },
+    ])
+
+    expect(prompt).toContain('Translate all natural-language prose')
+    expect(prompt).toContain('Preserve literal technical tokens exactly')
+    expect(prompt).toContain('Technical density is not a reason to copy the source')
+    expect(prompt).toContain('Do not return an entire block unchanged')
+    expect(prompt).toContain(JSON.stringify([{ id: 'technical', tag: 'li', text: source }]))
   })
 })
 

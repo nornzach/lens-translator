@@ -4,7 +4,6 @@ import type {
   TranslateBlock,
 } from '../shared/messages'
 import type { UserSettings } from '../shared/settings-defaults'
-import { DEFAULT_SETTINGS } from '../shared/settings-defaults'
 import { runWithConcurrency } from '../shared/concurrency'
 import {
   isPageTranslatableText,
@@ -14,10 +13,12 @@ import {
 import {
   collectPageRoots,
   elementText,
+  pageSourceText,
   extractPageBlocks,
   isUiLabelElement,
   isVisible,
   PAGE_SOURCE_ATTR,
+  PAGE_SEGMENT_ATTR,
   type ExtractedBlock,
 } from './extract'
 import { makePageKey } from './page-key'
@@ -29,22 +30,12 @@ import {
 } from './page-alignment'
 
 const TRANSLATED_ATTR = 'data-lens-page-translated'
-const TRANSLATION_TEXT_ATTR = 'data-lens-page-translation-text'
-const PENDING_ATTR = 'data-lens-page-pending'
-const UI_PENDING_ATTR = 'data-lens-page-ui-pending'
-const UI_TRANSLATION_ATTR = 'data-lens-page-ui-translation'
-const UI_STACKED_TRANSLATION_ATTR = 'data-lens-page-ui-stacked-translation'
-const UI_CONTROL_TRANSLATION_ATTR = 'data-lens-page-ui-control-translation'
 const STYLE_ID = 'lens-translator-page-style'
 const STATUS_ID = 'lens-translator-page-status'
-// Marks hosts whose translation renders as a floating overlay instead of ::after.
-// Used on virtualized feeds (X, Reddit, etc.) where ::after would inflate the
-// item height and trip the recycler into a layout-thrash loop.
-const OVERLAY_RENDER_ATTR = 'data-lens-page-render'
-const OVERLAY_RENDER_VALUE = 'overlay'
-const OVERLAY_HOST_ATTR = 'data-lens-page-overlay-host'
-const OVERLAY_ELEMENT_ATTR = 'data-lens-page-overlay'
-const OVERLAY_CONTAINER_ID = 'lens-translator-page-overlay-root'
+// Every translation stays inside its source. Controls use compact inline text;
+// prose uses a separate line, without changing ancestor layout.
+const INSERTED_ATTR = 'data-lens-page-inserted'
+const CONTROL_ATTR = 'data-lens-page-control'
 
 // A translated host that keeps mutating (clocks, counters, live chat) would loop
 // forever between invalidate and re-translate. After this many re-invalidations
@@ -84,16 +75,9 @@ export function pageStyles(settings: PageSettings): string {
   const radius = settings.pageTranslationUseBackground ? '4px' : '0'
   const opacity =
     settings.pageTranslationUseCustomColor || settings.pageTranslationUseBackground ? '1' : '0.78'
-  // Translation-only blocks default to the host's own size; explicit size wins.
-  const blockFontSize =
-    settings.pageTranslationFontSizePx === DEFAULT_SETTINGS.pageTranslationFontSizePx
-      ? '1em'
-      : `${settings.pageTranslationFontSizePx}px`
-  // ::after can't inherit from a transparent host — fall back to the runtime
-  // body color var unless the user picked an explicit translation color.
-  const translationOnlyColor = settings.pageTranslationUseCustomColor
-    ? settings.pageTranslationTextColor
-    : 'var(--lens-page-body-color, #172033)'
+  const fontSize = settings.pageTranslationUseOriginalFontSize
+    ? 'inherit'
+    : `${settings.pageTranslationFontSizePx}px`
   const fontFamily = {
     system: 'inherit',
     sans: 'Inter, ui-sans-serif, system-ui, sans-serif',
@@ -102,19 +86,14 @@ export function pageStyles(settings: PageSettings): string {
   }[settings.pageTranslationFontFamily]
 
   return `
-/* Overlay-rendered hosts (virtualized feeds) suppress ::after entirely —
-   the translation is painted by a floating div tracking the host rect.
-   Without this, the pseudo-element rules below would still inflate the host
-   height and trip the recycler into a layout-thrash loop. */
-[${TRANSLATED_ATTR}][${OVERLAY_RENDER_ATTR}]::after,
-[${PENDING_ATTR}][${OVERLAY_RENDER_ATTR}]::after {
-  content: none !important;
-  display: none !important;
-}
-
-[${TRANSLATED_ATTR}]::after {
-  content: attr(${TRANSLATION_TEXT_ATTR}) !important;
+/* Every translation is a source-owned child. It never climbs into an ancestor
+   layout, so component, table, list, and slot boundaries remain intact.
+   "all: initial" cuts it off from hostile site wildcard styles. */
+[${INSERTED_ATTR}] {
+  all: initial !important;
   display: block !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
   box-sizing: border-box !important;
   margin: 0.24em 0 0.1em !important;
   padding: ${padding} !important;
@@ -123,13 +102,13 @@ export function pageStyles(settings: PageSettings): string {
   background: ${background} !important;
   color: ${color} !important;
   font-family: ${fontFamily} !important;
-  font-size: ${settings.pageTranslationFontSizePx}px !important;
-  font-style: ${settings.pageTranslationItalic ? 'italic' : 'normal'} !important;
-  font-weight: ${settings.pageTranslationBold ? '700' : '400'} !important;
-  line-height: 1.45 !important;
+  font-size: ${fontSize} !important;
+  font-style: ${settings.pageTranslationItalic ? 'italic' : 'inherit'} !important;
+  font-weight: ${settings.pageTranslationBold ? '700' : 'inherit'} !important;
+  line-height: inherit !important;
   letter-spacing: 0 !important;
   overflow-wrap: anywhere !important;
-  text-align: start !important;
+  text-align: inherit !important;
   text-decoration: ${settings.pageTranslationUnderline ? 'underline' : 'none'} !important;
   text-transform: none !important;
   unicode-bidi: plaintext !important;
@@ -137,42 +116,19 @@ export function pageStyles(settings: PageSettings): string {
   opacity: ${opacity} !important;
 }
 
-[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}]::after {
-  content: " · " attr(${TRANSLATION_TEXT_ATTR}) !important;
-  display: inline-block !important;
-  vertical-align: baseline !important;
-  margin: 0 0 0 0.32em !important;
-  padding: 0 !important;
-  border: 0 !important;
-  background: transparent !important;
-  color: inherit !important;
-  font-size: 0.68em !important;
-  font-style: normal !important;
-  font-weight: 400 !important;
-  line-height: inherit !important;
-  text-decoration: none !important;
-  white-space: normal !important;
-  opacity: 0.62 !important;
+[${INSERTED_ATTR}]:not([${CONTROL_ATTR}]) {
+  width: 100% !important;
+  flex: 0 0 100% !important;
+  grid-column: 1 / -1 !important;
 }
 
-[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}][${UI_STACKED_TRANSLATION_ATTR}]::after {
-  content: attr(${TRANSLATION_TEXT_ATTR}) !important;
-  display: block !important;
-  margin: 0.12em 0 0 !important;
-  font-size: 0.58em !important;
-  line-height: 1.15 !important;
-  white-space: normal !important;
-}
-
-[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}][${UI_CONTROL_TRANSLATION_ATTR}]::after {
-  content: " · " attr(${TRANSLATION_TEXT_ATTR}) !important;
-  display: inline-block !important;
+[${INSERTED_ATTR}][${CONTROL_ATTR}] {
+  display: inline !important;
+  margin: 0 0 0 0.35em !important;
   vertical-align: baseline !important;
-  margin-left: 0.3em !important;
-  font-size: 0.7em !important;
-  line-height: inherit !important;
   white-space: nowrap !important;
 }
+
 
 ::highlight(${PAGE_ALIGNMENT_HIGHLIGHT_NAME}) {
   background: rgb(250 204 21 / 52%);
@@ -182,82 +138,23 @@ export function pageStyles(settings: PageSettings): string {
   text-decoration-thickness: 2px;
 }
 
-/* Pending LLM translation: shimmer placeholder where the translation will land. */
-@keyframes lens-translator-pending-shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
-}
-
-[${PENDING_ATTR}]::after {
-  content: '' !important;
-  display: block !important;
-  box-sizing: border-box !important;
-  margin: 0.24em 0 0.1em !important;
-  width: min(420px, 68%) !important;
-  height: 1.05em !important;
-  border: 0 !important;
-  border-radius: 4px !important;
-  background: linear-gradient(90deg, rgb(148 163 184 / 14%) 25%, rgb(148 163 184 / 32%) 50%, rgb(148 163 184 / 14%) 75%) !important;
-  background-size: 200% 100% !important;
-  animation: lens-translator-pending-shimmer 1.4s linear infinite !important;
-}
-
-[${PENDING_ATTR}][${UI_PENDING_ATTR}]::after {
-  display: inline-block !important;
-  vertical-align: baseline !important;
-  width: 2.8em !important;
-  height: 0.8em !important;
-  margin: 0 0 0 0.32em !important;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  [${PENDING_ATTR}]::after {
-    animation: none !important;
-  }
-}
-
 [${PAGE_ALIGNMENT_FALLBACK_ATTR}] {
   background-color: rgb(250 204 21 / 22%) !important;
 }
 ${
   settings.pageTranslationDisplayMode === 'translation-only'
     ? `
-/* Translation-only, two host classes:
-   - Block hosts: visibility hides glyphs AND inline-chip backgrounds/borders
-     (code pills, search kbd) while keeping every box's geometry — no holes,
-     no collapse. ::after opts back into visibility, and since the host keeps
-     its real color, inherit still follows the page theme.
-   - UI hosts (buttons, nav): the control's own box must survive, so only the
-     label text goes transparent; ::after needs an explicit color because
-     inherit would follow the transparent label.
-   - Overlay hosts (virtualized feeds):原文必须保持可见,否则条目高度不变
-     但内容消失,造成空白。translation-only 在虚拟信息流上降级为双语。 */
-[${TRANSLATED_ATTR}]:not([${UI_TRANSLATION_ATTR}]):not([${OVERLAY_RENDER_ATTR}]) {
+/* Hide original glyphs but keep every box's geometry — no holes, no collapse.
+   The source-owned translation child is restored below. */
+[${TRANSLATED_ATTR}],
+[${TRANSLATED_ATTR}] * {
   visibility: hidden !important;
 }
-[${TRANSLATED_ATTR}]:not([${UI_TRANSLATION_ATTR}]):not([${OVERLAY_RENDER_ATTR}])::after {
+[${TRANSLATED_ATTR}] :is(input, textarea, select, video, audio, canvas, iframe, img, svg) {
   visibility: visible !important;
 }
-/* Interactive controls and media inside translated blocks stay usable. */
-[${TRANSLATED_ATTR}]:not([${UI_TRANSLATION_ATTR}]) :is(input, textarea, select, video, audio, canvas, iframe, img, svg) {
+[${INSERTED_ATTR}] {
   visibility: visible !important;
-}
-[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}],
-[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}] *:not([data-lens-ignore]):not([data-lens-ignore] *) {
-  color: transparent !important;
-  text-shadow: none !important;
-}
-/* Block translations default to the host's own size so the headline/body
-   hierarchy survives; an explicit custom font size always wins. */
-[${TRANSLATED_ATTR}]::after {
-  font-size: ${blockFontSize} !important;
-}
-/* Compact UI labels keep the configured absolute size and an explicit color. */
-[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}]::after,
-[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}][${UI_STACKED_TRANSLATION_ATTR}]::after,
-[${TRANSLATED_ATTR}][${UI_TRANSLATION_ATTR}][${UI_CONTROL_TRANSLATION_ATTR}]::after {
-  font-size: ${settings.pageTranslationFontSizePx}px !important;
-  color: ${translationOnlyColor} !important;
 }
 `
     : ''
@@ -266,12 +163,12 @@ ${
     ? `
 /* Learning mode: translations stay blurred until hovered — read the original
    first, peek only when stuck. */
-[${TRANSLATED_ATTR}]::after {
+[${INSERTED_ATTR}] {
   filter: blur(5px) !important;
   opacity: 0.35 !important;
   transition: filter 0.15s ease, opacity 0.15s ease !important;
 }
-[${TRANSLATED_ATTR}]:hover::after {
+[${INSERTED_ATTR}]:hover {
   filter: none !important;
   opacity: 1 !important;
 }
@@ -319,6 +216,7 @@ type PageSettings = Pick<
   | 'pageTranslationDisplayMode'
   | 'pageTranslationFontFamily'
   | 'pageTranslationFontSizePx'
+  | 'pageTranslationUseOriginalFontSize'
   | 'pageTranslationUseCustomColor'
   | 'pageTranslationTextColor'
   | 'pageTranslationUseBackground'
@@ -393,81 +291,6 @@ export function groupPageBlocks(blocks: ExtractedBlock[]): TranslationGroup[] {
   return [...groups.values()]
 }
 
-const PAGE_UI_CHROME_SELECTOR =
-  'nav, [role="navigation"], [role="banner"], [role="menu"], [role="tablist"], [role="search"], [role="toolbar"]'
-const PAGE_CONTROL_SELECTOR =
-  'button, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemradio"], [role="option"]'
-
-/**
- * Interactive grid/chart widgets (calendars, heatmaps, spreadsheets) pack short labels into
- * fixed-size cells. Appending an inline translation there overflows the cell and breaks the
- * layout (e.g. the GitHub contribution graph), so full-page mode leaves their text untouched.
- * This also covers the graph *legend* ("Less [][][][] More"), whose level swatches live outside
- * the grid and would otherwise get "没低中高" crammed on top of each tiny square.
- */
-const PAGE_LAYOUT_LOCKED_SELECTOR =
-  '[role="grid"], [role="treegrid"], [class*="ContributionCalendar"], .js-calendar-graph, .contrib-legend, [class*="ContributionCalendar"] [data-level], .js-calendar-graph [data-level]'
-
-/** Month / weekday axis tokens: near-zero translation value, high layout risk in charts & calendars. */
-const DATE_AXIS_LABEL_RE =
-  /^(?:mon|tue|tues|wed|weds|thu|thur|thurs|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)$/i
-
-function isDateAxisLabel(text: string): boolean {
-  return DATE_AXIS_LABEL_RE.test(normalizeText(text))
-}
-
-export function isPageUiTranslationCandidate(block: ExtractedBlock): boolean {
-  return Boolean(
-    isUiLabelElement(block.el) ||
-      block.el.closest(PAGE_UI_CHROME_SELECTOR) ||
-      block.el.closest(PAGE_CONTROL_SELECTOR),
-  )
-}
-
-function isButtonLikeUi(block: ExtractedBlock): boolean {
-  if (block.el.closest('button, [role="button"]')) return true
-  const marker = `${block.el.getAttribute('class') ?? ''} ${block.el.getAttribute('data-testid') ?? ''}`
-  return /(?:^|[\s_-])(?:button|btn|submit)(?:$|[\s_-])/iu.test(marker)
-}
-
-/** Attach generated UI copy to the text label instead of the outer flex control. */
-export function pageTranslationHost(block: ExtractedBlock): Element {
-  if (!isPageUiTranslationCandidate(block)) return block.el
-  const text = normalizeText(block.text)
-  let host = block.el
-  for (const candidate of block.el.querySelectorAll('*')) {
-    const tag = candidate.tagName.toLowerCase()
-    if (tag === 'svg' || tag === 'path' || tag === 'img') continue
-    if (normalizeText(elementText(candidate)) === text) host = candidate
-  }
-  return host
-}
-
-/** Full-page mode favors reading content over site chrome and compact metadata. */
-export function isPageTranslationCandidate(
-  block: ExtractedBlock,
-  minTextLength: number,
-): boolean {
-  const { el, text } = block
-  if (el.closest('time')) return false
-  // Data-visualization widgets and bare date-axis labels break layout or add no value.
-  if (el.closest(PAGE_LAYOUT_LOCKED_SELECTOR)) return false
-  if (isDateAxisLabel(text)) return false
-  const isUi = isPageUiTranslationCandidate(block)
-  if (isUi && /@[\p{L}\p{N}_-]+/u.test(text)) return false
-  if (!isPageTranslatableText(text, isUi ? Math.min(2, minTextLength) : minTextLength)) {
-    return false
-  }
-  if (isUi) return true
-  if (isUiLabelElement(el)) return false
-
-  const link = el.closest('a, [role="link"]')
-  if (link && text.length <= 48 && normalizeText(elementText(link)) === normalizeText(text)) {
-    return false
-  }
-  return true
-}
-
 type ScrollAnchor = { el: Element; top: number; at: number }
 
 const virtualScrollCache = new WeakMap<Element, Element | null>()
@@ -476,13 +299,15 @@ const virtualScrollCache = new WeakMap<Element, Element | null>()
  * Virtualized feeds (X timeline, Reddit, infinite lists) recycle DOM nodes as
  * the user scrolls: items leaving the viewport are unmounted, new ones are
  * inserted in their place. Appending a block-level translation under each item
- * via ::after inflates its height, which makes the recycler re-measure and
+ * inflates its height, which makes the recycler re-measure and
  * re-mount neighbours — a layout-thrash loop.
  *
- * Detect the nearest scroll container that is "tall + scrollable" so we can
- * switch those hosts to a floating overlay that does not enter the document flow.
+ * Detect the nearest tall, scrollable container so mutation handling scans only
+ * newly mounted items instead of repeatedly rescanning the whole recycler.
  */
 function findVirtualScrollAncestor(el: Element): Element | null {
+  // Long, scrollable sidebars are ordinary navigation, not recycled feeds.
+  if (el.closest('nav, aside, [role="navigation"], [role="complementary"]')) return null
   const cached = virtualScrollCache.get(el)
   if (cached !== undefined) return cached
   let node = el.parentElement
@@ -493,37 +318,146 @@ function findVirtualScrollAncestor(el: Element): Element | null {
     if (
       (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
       node.clientHeight > 0 &&
-      node.scrollHeight >= node.clientHeight * 2.5
+      node.scrollHeight >= node.clientHeight * 1.5
     ) {
       result = node
       break
     }
     node = node.parentElement
   }
-  virtualScrollCache.set(el, result)
+  // Cache hits only: a container still under the ratio may grow past it once
+  // content loads, and a locked negative would keep the host on the wrong path.
+  if (result) virtualScrollCache.set(el, result)
   return result
 }
 
-/** True when this host lives inside a virtualized scroller and must render as overlay. */
-function shouldRenderAsOverlay(el: Element): boolean {
-  return findVirtualScrollAncestor(el) !== null
+/** How an inserted translation sits in its host. */
+export type PlacementVerdict = 'ok' | 'narrow' | 'clipped'
+
+// Less room than this and CJK text degenerates into a one-glyph-per-line
+// vertical column (Reddit rail links, collapsed templates, icon cells).
+const MIN_TRANSLATION_WIDTH_EM = 2.5
+const CLIP_VALUES = new Set(['hidden', 'clip'])
+
+function rectOf(el: Element): DOMRect | null {
+  if (typeof el.getBoundingClientRect !== 'function') return null
+  try {
+    return el.getBoundingClientRect()
+  } catch {
+    return null
+  }
+}
+
+function styleOf(el: Element): CSSStyleDeclaration | null {
+  if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return null
+  try {
+    return window.getComputedStyle(el)
+  } catch {
+    return null
+  }
 }
 
 /**
- * Named hover handlers for learning-mode overlays. Defined at module scope so
- * addEventListener/removeEventListener can match the exact function reference
- * across restyle() calls — anonymous closures cannot be removed and would leak.
+ * Measure a translation node right after insertion. Sites pack UI copy into
+ * narrow, fixed-height, or overflow-clipped boxes (icon cells, zero-width
+ * templates, chips, drawer rows): a full-width block child there either
+ * collapses into a vertical glyph column, vanishes behind a clip, or stretches
+ * a shrink-to-fit control sideways.
+ *
+ * Environments without layout (unit-test stubs) measure nothing and pass.
  */
-function overlayLearningEnter(this: HTMLDivElement): void {
-  const style = this.style
-  style.filter = 'none'
-  style.opacity = '1'
+export function evaluatePlacement(
+  host: Element,
+  node: HTMLElement,
+  ui: boolean,
+): PlacementVerdict {
+  const rect = rectOf(node)
+  if (!rect) return 'ok'
+  const nodeStyle = styleOf(node)
+  const fontSize = nodeStyle ? parseFloat(nodeStyle.fontSize) || 14 : 14
+  const minWidth = ui ? 2 : Math.min(node.textContent?.trim().length || MIN_TRANSLATION_WIDTH_EM, MIN_TRANSLATION_WIDTH_EM) * fontSize
+  if (rect.width + 1 < minWidth || rect.height < 2) return 'narrow'
+  if (ui) {
+    const control = host.closest?.('a, button, label, summary, [role="button"], [role="tab"], [role="link"], [role^="menuitem"], [role="option"], [role="switch"]')
+    const bounds = control ? rectOf(control) : null
+    if (bounds && (rect.left < bounds.left - 1 || rect.right > bounds.right + 1 || rect.top < bounds.top - 1 || rect.bottom > bounds.bottom + 1)) return 'clipped'
+  }
+  // The host box itself must absorb the extra line: a fixed-height host or a
+  // small flex/grid row would push the translation over its next sibling
+  // (nav rails, drawer rows) even without overflow clipping.
+  const hostRect = rectOf(host)
+  const hostStyle = styleOf(host)
+  if (hostRect && hostStyle && hostStyle.display !== 'inline' &&
+      (rect.right > hostRect.right + 1 || rect.left < hostRect.left - 1)) return 'clipped'
+  if (hostRect && hostStyle && rect.bottom > hostRect.bottom + 1) {
+    const fixedHeight = hostStyle.height.endsWith('px') && hostRect.height < 160
+    const smallFlexRow =
+      (hostStyle.display.includes('flex') || hostStyle.display.includes('grid')) &&
+      hostRect.height < 100
+    if (fixedHeight || smallFlexRow) return 'clipped'
+  }
+  return clipVerdict(node, rect)
 }
 
-function overlayLearningLeave(this: HTMLDivElement): void {
-  const style = this.style
-  style.filter = 'blur(5px)'
-  style.opacity = '0.35'
+/** Clipped by any overflow-hidden/clip ancestor between the node and the page. */
+function clipVerdict(node: HTMLElement, rect: DOMRect): PlacementVerdict {
+  let cur: Element | null = node.parentElement
+  let depth = 0
+  while (cur && depth++ < 14) {
+    const style = styleOf(cur)
+    if (!style) break
+    if (CLIP_VALUES.has(style.overflowX) || CLIP_VALUES.has(style.overflowY)) {
+      const clip = rectOf(cur)
+      if (
+        clip &&
+        clip.width > 0 &&
+        clip.height > 0 &&
+        (rect.bottom > clip.bottom + 1 ||
+          rect.top < clip.top - 1 ||
+          rect.right > clip.right + 1 ||
+          rect.left < clip.left - 1)
+      ) {
+        return 'clipped'
+      }
+    }
+    cur = cur.parentElement
+  }
+  return 'ok'
+}
+
+/**
+ * A translation can fit its immediate host but overflow a fixed-height outer
+ * box. Check those ancestors too, without moving or resizing them.
+ */
+export function downstreamOverlap(node: HTMLElement): boolean {
+  const nr = rectOf(node)
+  if (!nr) return false
+  let cur: Element = node
+  let depth = 0
+  while (cur.parentElement && depth++ < 12) {
+    const parent = cur.parentElement
+    if (parent === document.body) break
+    const pr = rectOf(parent)
+    if (!pr) break
+    if (nr.bottom <= pr.bottom + 1) { cur = parent; continue }
+    let sib: Element | null = parent.nextElementSibling
+    while (sib && sib.hasAttribute?.('data-lens-ignore')) sib = sib.nextElementSibling
+    if (sib) {
+      const sr = rectOf(sib)
+      if (
+        sr &&
+        sr.height > 0 &&
+        sr.top < nr.bottom - 1 &&
+        sr.bottom > nr.top + 1 &&
+        sr.left < nr.right &&
+        sr.right > nr.left
+      ) {
+        return true
+      }
+    }
+    cur = parent
+  }
+  return false
 }
 
 /** Owns one reversible full-page bilingual translation run. */
@@ -543,11 +477,14 @@ export class PageTranslator {
   private currentSettings: PageSettings | null = null
   private readonly dirtyRoots = new Set<ParentNode>()
   private readonly translatedHosts = new Set<Element>()
-  private readonly pendingHosts = new Set<Element>()
   private readonly sourceHosts = new Map<Element, string | null>()
   private attemptedTextByHost = new WeakMap<Element, string>()
   private sourceBlockByHost = new WeakMap<Element, Element>()
   private volatileHosts = new WeakSet<Element>()
+  private layoutFrame = 0
+  private readonly layoutSkippedHosts = new Set<Element>()
+  /** Styles injected into open shadow roots (document styles don't cross in). */
+  private readonly shadowStyles = new Map<ShadowRoot, HTMLStyleElement>()
   private hostChurn = new WeakMap<Element, ChurnRecord>()
   private readonly translationCache = new Map<string, string>()
   private retryAttempts = 0
@@ -556,13 +493,12 @@ export class PageTranslator {
   private totalCount = 0
   private forceRefresh = false
   private readonly alignment = new PageAlignmentController()
-  // Overlay rendering path for virtualized feeds. Maps a translated host to its
-  // floating overlay element. Overlay elements live in #OVERLAY_CONTAINER_ID
-  // under documentElement and track the host's rect via rAF on scroll/resize.
-  private readonly overlayByHost = new Map<Element, HTMLDivElement>()
-  private overlayRoot: HTMLDivElement | null = null
-  private overlayPositionFrame = 0
-  private scrollListenerAttached = false
+  // Maps a translated host to its inserted translation element.
+  private readonly insertedNodeByHost = new Map<Element, HTMLElement>()
+  // Reverse lookup: when the page removes one of our nodes we only see the node.
+  private readonly hostByInsertedNode = new Map<Element, Element>()
+  /** Source wrappers created only for paragraphs separated by hard line breaks. */
+  private readonly segmentWrappers = new Set<HTMLElement>()
 
   constructor(private readonly browserTranslator: BrowserTranslator) {}
 
@@ -585,20 +521,26 @@ export class PageTranslator {
 
   deactivate(): void {
     // Removing every translation at once shrinks the page above the reader.
-    // The previous rAF-based anchor补偿在虚拟滚动信息流(X 时间线)上失效:
-    // 虚拟列表会回收 anchor 元素,导致 getBoundingClientRect().top 测量到错误位置,
-    // scrollBy 越补越偏。改为同步保存/恢复滚动位置,避开 rAF 延迟和元素回收。
-    const scrollSnapshot = this.captureScrollSnapshot()
+    // Translations are in-flow, so removing them shrinks the content above the
+    // reader by their height. Raw scrollTop restore can't see that — remember
+    // the first on-screen translated host per scroller and re-align it after
+    // teardown, synchronously, before any recycler can react.
+    const scrollAnchors = this.captureScrollAnchors()
     this.active = false
     this.generation++
     this.observer?.disconnect()
     this.observer = null
+    window.removeEventListener('resize', this.onLayoutChange)
+    window.cancelAnimationFrame(this.layoutFrame)
+    this.layoutFrame = 0
+    this.layoutSkippedHosts.clear()
     this.alignment.deactivate()
     this.observedRoots = new WeakSet<Node>()
     this.lastStatusText = ''
     this.progressTick = 0
     window.clearTimeout(this.statusTimer)
     window.clearTimeout(this.mutationTimer)
+    this.mutationTimer = 0
     window.clearTimeout(this.initialRetryTimer)
     if (this.anchorFrame) {
       window.cancelAnimationFrame(this.anchorFrame)
@@ -607,33 +549,20 @@ export class PageTranslator {
     }
     for (const host of this.translatedHosts) {
       host.removeAttribute(TRANSLATED_ATTR)
-      host.removeAttribute(TRANSLATION_TEXT_ATTR)
-      host.removeAttribute(UI_TRANSLATION_ATTR)
-      host.removeAttribute(UI_STACKED_TRANSLATION_ATTR)
-      host.removeAttribute(UI_CONTROL_TRANSLATION_ATTR)
-      host.removeAttribute(OVERLAY_RENDER_ATTR)
-      host.removeAttribute(OVERLAY_HOST_ATTR)
     }
-    for (const [, overlay] of this.overlayByHost) overlay.remove()
-    this.overlayByHost.clear()
-    this.overlayRoot?.remove()
-    this.overlayRoot = null
-    this.detachScrollListener()
-    if (this.overlayPositionFrame) {
-      window.cancelAnimationFrame(this.overlayPositionFrame)
-      this.overlayPositionFrame = 0
-    }
-    for (const host of this.pendingHosts) {
-      host.removeAttribute(PENDING_ATTR)
-      host.removeAttribute(UI_PENDING_ATTR)
-    }
-    this.pendingHosts.clear()
+    for (const node of this.insertedNodeByHost.values()) node.remove()
+    this.insertedNodeByHost.clear()
+    this.hostByInsertedNode.clear()
     for (const [host, previous] of this.sourceHosts) {
       if (previous === null) host.removeAttribute(PAGE_SOURCE_ATTR)
       else host.setAttribute(PAGE_SOURCE_ATTR, previous)
     }
     this.translatedHosts.clear()
     this.sourceHosts.clear()
+    for (const wrapper of this.segmentWrappers) {
+      if (wrapper.isConnected) wrapper.replaceWith(...wrapper.childNodes)
+    }
+    this.segmentWrappers.clear()
     this.attemptedTextByHost = new WeakMap<Element, string>()
     this.sourceBlockByHost = new WeakMap<Element, Element>()
     this.volatileHosts = new WeakSet<Element>()
@@ -647,42 +576,42 @@ export class PageTranslator {
     this.rescanRequested = false
     document.getElementById(STATUS_ID)?.remove()
     document.getElementById(STYLE_ID)?.remove()
-    // Restore scroll positions synchronously after DOM teardown. On virtualized
-    // feeds the recycler may have already moved the viewport; clamping to the
-    // new scrollHeight is the best we can do.
-    this.restoreScrollSnapshot(scrollSnapshot)
+    // Re-align synchronously after DOM teardown, before any recycler reacts.
+    for (const style of this.shadowStyles.values()) style.remove()
+    this.shadowStyles.clear()
+    this.restoreScrollAnchors(scrollAnchors)
   }
 
-  /**
-   * Snapshot window + every inner scroll container that holds a translated host,
-   * so teardown can restore the reading position synchronously without relying
-   * on rAF (which fires after the recycler has already shifted the viewport).
-   */
-  private captureScrollSnapshot(): Map<Element | 'window', number> {
-    const snapshot = new Map<Element | 'window', number>()
-    snapshot.set('window', window.scrollY)
-    const containers = new Set<Element>()
+  /** First visible translated host per scroller, with its offset from the scroller top. */
+  private captureScrollAnchors(): Map<Element | 'window', { el: Element; top: number }> {
+    const anchors = new Map<Element | 'window', { el: Element; top: number }>()
     for (const host of this.translatedHosts) {
+      if (!host.isConnected) continue
       const container = this.scrollContainerOf(host)
-      if (container) containers.add(container)
+      const key: Element | 'window' = container ?? 'window'
+      const base = container ? container.getBoundingClientRect().top : 0
+      const top = host.getBoundingClientRect().top - base
+      if (top < 0) continue
+      const existing = anchors.get(key)
+      if (!existing || top < existing.top) anchors.set(key, { el: host, top })
     }
-    for (const container of containers) {
-      snapshot.set(container, container.scrollTop)
-    }
-    return snapshot
+    return anchors
   }
 
-  private restoreScrollSnapshot(snapshot: Map<Element | 'window', number>): void {
-    if (!snapshot.size) return
-    for (const [key, value] of snapshot) {
-      if (key === 'window') {
-        // Clamp to new document height — page may have shrunk above the reader.
-        const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
-        window.scrollTo(0, Math.min(value, max))
-      } else if (key.isConnected) {
-        const max = Math.max(0, key.scrollHeight - key.clientHeight)
-        key.scrollTop = Math.min(value, max)
-      }
+  /** Re-align each anchor after teardown removed the translations above it. */
+  private restoreScrollAnchors(anchors: Map<Element | 'window', { el: Element; top: number }>): void {
+    // Measure every delta before applying any scroll — a window scroll shifts
+    // the viewport position of inner scrollers, corrupting their measurement.
+    const adjustments: Array<{ key: Element | 'window'; delta: number }> = []
+    for (const [key, anchor] of anchors) {
+      if (!anchor.el.isConnected) continue
+      const base = key === 'window' ? 0 : key.getBoundingClientRect().top
+      const delta = anchor.el.getBoundingClientRect().top - base - anchor.top
+      if (delta) adjustments.push({ key, delta })
+    }
+    for (const { key, delta } of adjustments) {
+      if (key === 'window') window.scrollBy(0, delta)
+      else key.scrollBy(0, delta)
     }
   }
 
@@ -697,9 +626,7 @@ export class PageTranslator {
 
   /**
    * Re-apply appearance-only settings (font size, colors, weight…) without
-   * tearing down the active translation. Injected CSS uses `content: attr(...)`,
-   * so re-writing the stylesheet restyles every rendered translation in place.
-   * Overlay elements use inline styles, so they must be re-styled explicitly.
+   * tearing down the active translation or requesting it again.
    */
   restyle(settings: PageSettings): void {
     if (!this.active) return
@@ -708,26 +635,7 @@ export class PageTranslator {
     this.scheduleScrollAnchorRestore()
     this.currentSettings = settings
     this.ensureStyles(settings)
-    // Overlay elements bypass the stylesheet (inline styles); re-apply manually.
-    if (this.overlayByHost.size) {
-      // Theme may have changed since the overlays were created (e.g. Dark/Light
-      // toggle on X): invalidate the inherited-color cache so overlayInlineStyle
-      // picks up the new host color.
-      this.hostInheritedColorCache = new WeakMap()
-      const isLearning = settings.pageTranslationDisplayMode === 'learning'
-      for (const [host, overlay] of this.overlayByHost) {
-        if (!host.isConnected || !overlay.isConnected) continue
-        const style = overlay.style
-        const inline = this.overlayInlineStyle(settings, host)
-        for (const [key, value] of Object.entries(inline)) {
-          if (value !== undefined) (style as unknown as Record<string, string>)[key] = value
-        }
-        // Re-apply learning mode: toggles blur, pointer-events and hover
-        // handlers cleanly so switching displayMode does not leak listeners.
-        this.applyLearningMode(overlay, isLearning)
-        this.positionOverlay(host, overlay)
-      }
-    }
+    this.onLayoutChange()
   }
 
   async activate(
@@ -789,16 +697,24 @@ export class PageTranslator {
       this.cleanupDisconnectedHosts()
       if (initial) this.showStatus('正在分析页面文本…')
 
-      const blocksByElement = new Map<Element, ExtractedBlock>()
+      const blocksByElement = new Map<Node, ExtractedBlock>()
       for (const root of scanRoots) {
         if (root !== document && root instanceof Node && !root.isConnected) continue
         for (const block of extractPageBlocks(settings.minTextLength, root)) {
-          blocksByElement.set(block.el, block)
+          blocksByElement.set(block.segmentNodes?.[0] ?? block.el, block)
         }
       }
       const blocks = [...blocksByElement.values()].filter((block) => {
         if (this.volatileHosts.has(block.el)) return false
-        if (!isPageTranslationCandidate(block, settings.minTextLength)) return false
+        if (block.el.closest('time')) return false
+        if (
+          !isPageTranslatableText(
+            block.text,
+            isUiLabelElement(block.el) ? 1 : settings.minTextLength,
+          )
+        ) {
+          return false
+        }
         if (isPredominantlyTargetLanguage(block.text, settings.targetLang)) return false
         if (this.translatedHosts.has(block.el)) return false
         return this.attemptedTextByHost.get(block.el) !== block.text
@@ -860,7 +776,7 @@ export class PageTranslator {
       }
       if (!this.isCurrent(generation)) return
 
-      if (initial && this.translatedCount === 0 && this.translatedHosts.size === 0) {
+      if (initial && this.translatedCount === 0 && this.translatedHosts.size === 0 && !this.rescanRequested) {
         this.failActivation(translateError ?? '整页翻译失败，当前语言对可能不可用')
         return
       }
@@ -953,11 +869,8 @@ export class PageTranslator {
     // (bounded parallelism), and each line renders the moment its translation
     // lands instead of waiting for a multi-block batch.
     this.scheduleScrollAnchorRestore()
-    for (const group of groups) this.markGroupPending(group)
-
     const runLine = async (group: TranslationGroup): Promise<void> => {
       if (!this.isCurrent(generation)) return
-      let rendered = false
       try {
         const response: unknown = await chrome.runtime.sendMessage({
           type: 'translate-batch',
@@ -973,17 +886,12 @@ export class PageTranslator {
         if (!isTranslateBatchResult(response)) throw new Error('翻译服务未返回有效结果')
 
         const item = response.translations?.find((row) => row.id === group.representative.id)
-        if (item) {
-          this.renderGroup(group, item.translation, settings)
-          rendered = true
-        }
+        if (item) this.renderGroup(group, item.translation, settings)
         if (!response.ok && firstError === null) firstError = response.error
       } catch (error) {
         if (firstError === null) {
           firstError = error instanceof Error ? error.message : String(error)
         }
-      } finally {
-        if (!rendered) this.clearGroupPending(group)
       }
 
       if (!this.isCurrent(generation)) return
@@ -999,81 +907,45 @@ export class PageTranslator {
     }
   }
 
-  /** The element the translation (and its pending placeholder) attaches to. */
-  private hostForBlock(block: ExtractedBlock): { host: Element; isUi: boolean } {
-    const isUi = isPageUiTranslationCandidate(block)
-    return { isUi, host: isUi ? pageTranslationHost(block) : block.el }
-  }
-
-  private markGroupPending(group: TranslationGroup): void {
-    for (const block of group.blocks) {
-      if (!block.el.isConnected) continue
-      const { host, isUi } = this.hostForBlock(block)
-      if (this.translatedHosts.has(host)) continue
-      // Virtualized feeds: the pending ::after shimmer would inflate the host
-      // height and trip the recycler. Skip the placeholder there — translations
-      // stream in fast enough that the brief gap is preferable to layout thrash.
-      // The host is still tracked in pendingHosts for cancellation accounting.
-      if (!isUi && shouldRenderAsOverlay(host)) {
-        this.pendingHosts.add(host)
-        continue
-      }
-      host.setAttribute(PENDING_ATTR, '')
-      if (isUi) host.setAttribute(UI_PENDING_ATTR, '')
-      this.pendingHosts.add(host)
-    }
-  }
-
-  private clearHostPending(host: Element): void {
-    if (!this.pendingHosts.delete(host)) return
-    host.removeAttribute(PENDING_ATTR)
-    host.removeAttribute(UI_PENDING_ATTR)
-  }
-
-  private clearGroupPending(group: TranslationGroup): void {
-    for (const block of group.blocks) {
-      if (!block.el.isConnected) continue
-      this.clearHostPending(this.hostForBlock(block).host)
-    }
-  }
-
   private renderGroup(group: TranslationGroup, translation: string, settings: PageSettings): void {
-    // Appended block translations push everything below them down; anchor the
+    // Appended translations push everything below them down; anchor the
     // reading position before mutating so streamed renders do not drift the page.
     this.scheduleScrollAnchorRestore()
     this.translationCache.set(group.representative.text, translation)
     for (const block of group.blocks) {
-      if (!block.el.isConnected) continue
-      const { host, isUi } = this.hostForBlock(block)
-      this.clearHostPending(host)
-      if (this.translatedHosts.has(host)) continue
+      // DOM identity survives virtualized content replacement. A late response
+      // only belongs to the exact source that was sent, not its replacement.
+      if (!block.el.isConnected || this.translatedHosts.has(block.el)) continue
+      if (!block.segmentNodes && pageSourceText(block.el) !== block.text) {
+        this.attemptedTextByHost.delete(block.el)
+        this.dirtyRoots.add(block.el)
+        this.rescanRequested = true
+        continue
+      }
+      const host = this.materializeSegmentHost(block)
+      if (!host || !host.isConnected || this.translatedHosts.has(host)) continue
       if (!this.sourceHosts.has(host)) {
         this.sourceHosts.set(host, host.getAttribute(PAGE_SOURCE_ATTR))
         host.setAttribute(PAGE_SOURCE_ATTR, block.text)
       }
-      // Virtualized feeds: render as a floating overlay that does not enter the
-      // document flow, so the recycler does not re-measure and thrash.
-      const useOverlay = !isUi && shouldRenderAsOverlay(host)
       host.setAttribute(TRANSLATED_ATTR, '')
-      if (useOverlay) {
-        host.setAttribute(OVERLAY_RENDER_ATTR, OVERLAY_RENDER_VALUE)
-        host.setAttribute(OVERLAY_HOST_ATTR, '')
-        this.createOverlayForHost(host, translation, settings)
-      } else {
-        host.setAttribute(TRANSLATION_TEXT_ATTR, translation)
-      }
-      if (isUi) {
-        host.setAttribute(UI_TRANSLATION_ATTR, '')
-        if (isButtonLikeUi(block)) {
-          host.setAttribute(UI_CONTROL_TRANSLATION_ATTR, '')
-        } else {
-          const display = window.getComputedStyle(host).display
-          if (!display.includes('flex') && !display.includes('grid')) {
-            host.setAttribute(UI_STACKED_TRANSLATION_ATTR, '')
-          }
-        }
+      const translationEl = this.insertTranslationIntoHost(host, translation)
+      if (!translationEl) {
+        // No placement survives this host's layout constraints (icon cell,
+        // clipped chip, collapsed template). Leave the original untouched and
+        // retry only after source or layout changes, without a new API request.
+        host.removeAttribute(TRANSLATED_ATTR)
+        const previous = this.sourceHosts.get(host)
+        if (previous === null) host.removeAttribute(PAGE_SOURCE_ATTR)
+        else if (previous !== undefined) host.setAttribute(PAGE_SOURCE_ATTR, previous)
+        this.sourceHosts.delete(host)
+        this.attemptedTextByHost.set(host, block.text)
+        this.layoutSkippedHosts.add(host)
+        this.totalCount = Math.max(0, this.totalCount - 1)
+        continue
       }
       this.translatedHosts.add(host)
+      this.layoutSkippedHosts.delete(host)
       this.sourceBlockByHost.set(host, block.el)
       this.alignment.register(
         host,
@@ -1081,190 +953,94 @@ export class PageTranslator {
         translation,
         settings.sourceLang,
         settings.targetLang,
-        isPageUiTranslationCandidate(block),
+        translationEl,
       )
       this.translatedCount++
     }
   }
 
-  /** Lazily create the shared overlay container under documentElement. */
-  private ensureOverlayRoot(): HTMLDivElement {
-    if (this.overlayRoot?.isConnected) return this.overlayRoot
-    const root = document.createElement('div')
-    root.id = OVERLAY_CONTAINER_ID
-    root.setAttribute('data-lens-ignore', '')
-    document.documentElement.append(root)
-    this.overlayRoot = root
-    return root
+  private materializeSegmentHost(block: ExtractedBlock): Element | null {
+    const nodes = block.segmentNodes
+    if (!nodes?.length) return block.el
+    const parent = nodes[0].parentNode
+    if (
+      !parent ||
+      nodes.some((node) => !node.isConnected || node.parentNode !== parent) ||
+      nodes.some((node, index) => index > 0 && nodes[index - 1].nextSibling !== node) ||
+      normalizeText(nodes.map((node) => node.textContent ?? '').join('')) !== block.text
+    ) {
+      return null
+    }
+    const wrapper = document.createElement('span')
+    wrapper.setAttribute(PAGE_SEGMENT_ATTR, '')
+    parent.insertBefore(wrapper, nodes[0])
+    for (const node of nodes) wrapper.append(node)
+    this.segmentWrappers.add(wrapper)
+    return wrapper
   }
 
   /**
-   * Build the inline style for a translation overlay. Mirrors the ::after rules
-   * in pageStyles() so virtualized feeds visually match the pseudo-element path.
+   * Insert one neutral <span> into the exact source host.
+   * Returns null when no placement survives the host's layout — the caller
+   * must then leave the original text untouched.
    */
-  private overlayInlineStyle(settings: PageSettings, host: Element): Record<string, string> {
-    const useCustomColor = settings.pageTranslationUseCustomColor
-    const useBackground = settings.pageTranslationUseBackground
-    const fontFamily = {
-      system: 'inherit',
-      sans: 'Inter, ui-sans-serif, system-ui, sans-serif',
-      serif: 'Georgia, "Times New Roman", serif',
-      mono: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
-    }[settings.pageTranslationFontFamily]
-    const opacity = useCustomColor || useBackground ? '1' : '0.78'
-    const styles: Record<string, string> = {
-      all: 'initial',
-      position: 'fixed',
-      zIndex: '2147483646',
-      boxSizing: 'border-box',
-      display: 'block',
-      margin: '0',
-      padding: useBackground ? '0.3em 0.5em' : '0',
-      border: '0',
-      borderRadius: useBackground ? '4px' : '0',
-      background: useBackground ? settings.pageTranslationBackgroundColor : 'transparent',
-      color: useCustomColor ? settings.pageTranslationTextColor : this.hostInheritedColor(host),
-      fontFamily,
-      fontSize: `${settings.pageTranslationFontSizePx}px`,
-      fontStyle: settings.pageTranslationItalic ? 'italic' : 'normal',
-      fontWeight: settings.pageTranslationBold ? '700' : '400',
-      lineHeight: '1.45',
-      letterSpacing: '0',
-      overflowWrap: 'anywhere',
-      textAlign: 'start',
-      textDecoration: settings.pageTranslationUnderline ? 'underline' : 'none',
-      textTransform: 'none',
-      unicodeBidi: 'plaintext',
-      whiteSpace: 'pre-wrap',
-      opacity,
-      // Translations are non-interactive: let clicks pass through to the page
-      // underneath. Learning mode flips this to 'auto' so hover reveals the text.
-      pointerEvents: 'none',
+  private insertTranslationIntoHost(host: Element, translation: string): HTMLElement | null {
+    this.removeInsertedNodeForHost(host)
+    const control = isUiLabelElement(host)
+    const node = document.createElement('span')
+    node.setAttribute(INSERTED_ATTR, '')
+    node.setAttribute('data-lens-ignore', '')
+    if (control) node.setAttribute(CONTROL_ATTR, '')
+    node.textContent = translation
+    // Document styles never cross the shadow boundary — mirror the stylesheet
+    // into each open shadow root that receives a translation.
+    const root = host.getRootNode()
+    if (root instanceof ShadowRoot && !this.shadowStyles.has(root) && this.currentSettings) {
+      const style = document.createElement('style')
+      style.setAttribute('data-lens-ignore', '')
+      style.textContent = pageStyles(this.currentSettings)
+      root.prepend(style)
+      this.shadowStyles.set(root, style)
     }
-    return styles
-  }
-
-  private hostInheritedColorCache = new WeakMap<Element, string>()
-  private hostInheritedColor(host: Element): string {
-    const cached = this.hostInheritedColorCache.get(host)
-    if (cached) return cached
-    let color = '#172033'
-    try {
-      const value = window.getComputedStyle(host).color
-      if (value) color = value
-    } catch {
-      // getComputedStyle may throw on detached elements
+    this.placeTranslationNode(host, node)
+    if (evaluatePlacement(host, node, control) !== 'ok' || downstreamOverlap(node)) {
+      // ponytail: fixed/clipped boxes keep their original geometry; use the
+      // existing lens there instead of inventing cross-component placement.
+      node.remove()
+      return null
     }
-    this.hostInheritedColorCache.set(host, color)
-    return color
+    this.insertedNodeByHost.set(host, node)
+    this.hostByInsertedNode.set(node, host)
+    return node
   }
 
-  /** Create the floating overlay element that visually sits below the host. */
-  private createOverlayForHost(
-    host: Element,
-    translation: string,
-    settings: PageSettings,
-  ): void {
-    const root = this.ensureOverlayRoot()
-    const overlay = document.createElement('div')
-    overlay.setAttribute(OVERLAY_ELEMENT_ATTR, '')
-    overlay.setAttribute('data-lens-ignore', '')
-    overlay.textContent = translation
-    const style = overlay.style
-    const inline = this.overlayInlineStyle(settings, host)
-    for (const [key, value] of Object.entries(inline)) {
-      if (value !== undefined) (style as unknown as Record<string, string>)[key] = value
+  private placeTranslationNode(host: Element, node: HTMLElement): void {
+    host.append(node)
+  }
+
+  /** Remove the inserted translation node for a host (invalidate / teardown). */
+  private removeInsertedNodeForHost(host: Element): void {
+    const node = this.insertedNodeByHost.get(host)
+    if (!node) return
+    this.insertedNodeByHost.delete(host)
+    this.hostByInsertedNode.delete(node)
+    node.remove()
+  }
+
+  /**
+   * Removal-by-the-site churn counter, mirroring the text-change churn: a host
+   * whose translation keeps getting stripped goes volatile instead of looping
+   * invalidate → re-translate → re-insert forever.
+   */
+  private recordTranslationRemoval(host: Element): boolean {
+    const now = Date.now()
+    const record = this.hostChurn.get(host)
+    if (!record || now - record.since > VOLATILE_CHURN_WINDOW_MS) {
+      this.hostChurn.set(host, { count: 1, since: now })
+      return false
     }
-    root.append(overlay)
-    this.overlayByHost.set(host, overlay)
-    this.positionOverlay(host, overlay)
-    this.attachScrollListener()
-    this.applyLearningMode(overlay, settings.pageTranslationDisplayMode === 'learning')
-  }
-
-  /** Apply or remove learning-mode blur + hover behaviour on an overlay. */
-  private applyLearningMode(overlay: HTMLDivElement, enabled: boolean): void {
-    const style = overlay.style
-    // Always detach previous handlers first so restyle can toggle cleanly
-    // without leaking listeners or stacking duplicates.
-    overlay.removeEventListener('mouseenter', overlayLearningEnter)
-    overlay.removeEventListener('mouseleave', overlayLearningLeave)
-    if (!enabled) {
-      // Only clear learning-specific props; leave opacity/pointerEvents to
-      // overlayInlineStyle (which sets them to the correct non-learning values).
-      style.filter = ''
-      style.transition = ''
-      return
-    }
-    style.filter = 'blur(5px)'
-    style.opacity = '0.35'
-    style.transition = 'filter 0.15s ease, opacity 0.15s ease'
-    // Learning mode needs pointer events so the user can hover to reveal.
-    style.pointerEvents = 'auto'
-    overlay.addEventListener('mouseenter', overlayLearningEnter)
-    overlay.addEventListener('mouseleave', overlayLearningLeave)
-  }
-
-  /** Position a single overlay under its host using current geometry. */
-  private positionOverlay(host: Element, overlay: HTMLDivElement): void {
-    if (!host.isConnected) return
-    const hostRect = host.getBoundingClientRect()
-    const hostStyle = window.getComputedStyle(host)
-    const left =
-      hostRect.left +
-      parseFloat(hostStyle.borderLeftWidth || '0') +
-      parseFloat(hostStyle.paddingLeft || '0')
-    const width =
-      hostRect.width -
-      parseFloat(hostStyle.borderLeftWidth || '0') -
-      parseFloat(hostStyle.borderRightWidth || '0') -
-      parseFloat(hostStyle.paddingLeft || '0') -
-      parseFloat(hostStyle.paddingRight || '0')
-    overlay.style.left = `${Math.round(left)}px`
-    overlay.style.top = `${Math.round(hostRect.bottom)}px`
-    overlay.style.width = `${Math.max(1, Math.round(width))}px`
-  }
-
-  /** Reposition every active overlay. Called on scroll/resize via rAF. */
-  private scheduleOverlayPositionUpdate(): void {
-    if (this.overlayPositionFrame) return
-    this.overlayPositionFrame = window.requestAnimationFrame(() => {
-      this.overlayPositionFrame = 0
-      for (const [host, overlay] of this.overlayByHost) {
-        if (!host.isConnected || !overlay.isConnected) continue
-        this.positionOverlay(host, overlay)
-      }
-    })
-  }
-
-  private attachScrollListener(): void {
-    if (this.scrollListenerAttached) return
-    this.scrollListenerAttached = true
-    // capture=true so we hear scroll events from any inner scroller before they
-    // bubble; passive=true so we never block native scrolling.
-    window.addEventListener('scroll', this.onScrollOrResize, { capture: true, passive: true })
-    window.addEventListener('resize', this.onScrollOrResize, { passive: true })
-  }
-
-  private detachScrollListener(): void {
-    if (!this.scrollListenerAttached) return
-    this.scrollListenerAttached = false
-    window.removeEventListener('scroll', this.onScrollOrResize, { capture: true })
-    window.removeEventListener('resize', this.onScrollOrResize)
-  }
-
-  private readonly onScrollOrResize = (): void => {
-    this.scheduleOverlayPositionUpdate()
-  }
-
-  /** Remove the overlay element for a host (used on invalidate / teardown). */
-  private removeOverlayForHost(host: Element): void {
-    const overlay = this.overlayByHost.get(host)
-    if (!overlay) return
-    overlay.remove()
-    this.overlayByHost.delete(host)
-    host.removeAttribute(OVERLAY_HOST_ATTR)
-    host.removeAttribute(OVERLAY_RENDER_ATTR)
+    record.count++
+    return record.count >= VOLATILE_CHURN_LIMIT
   }
 
   private startObserving(): void {
@@ -1272,6 +1048,30 @@ export class PageTranslator {
     this.observedRoots = new WeakSet<Node>()
     this.observer = new MutationObserver((records) => this.onMutations(records))
     this.observePageRoots([document])
+    window.addEventListener('resize', this.onLayoutChange)
+  }
+
+  private readonly onLayoutChange = (): void => {
+    if (!this.active || this.layoutFrame) return
+    this.layoutFrame = window.requestAnimationFrame(() => {
+      this.layoutFrame = 0
+      const retry = [...this.layoutSkippedHosts]
+      for (const [host, node] of this.insertedNodeByHost) {
+        if (!host.isConnected || !node.isConnected) continue
+        if (evaluatePlacement(host, node, isUiLabelElement(host)) === 'ok' && !downstreamOverlap(node)) continue
+        const source = host.getAttribute(PAGE_SOURCE_ATTR) ?? ''
+        this.invalidateHost(host)
+        this.attemptedTextByHost.set(host, source)
+        this.layoutSkippedHosts.add(host)
+      }
+      for (const host of retry) {
+        this.layoutSkippedHosts.delete(host)
+        if (!host.isConnected) continue
+        this.attemptedTextByHost.delete(host)
+        this.dirtyRoots.add(host)
+      }
+      if (retry.length) this.scheduleScan()
+    })
   }
 
   private observePageRoots(scanRoots: ParentNode[]): void {
@@ -1285,7 +1085,7 @@ export class PageTranslator {
           subtree: true,
           characterData: true,
           attributes: true,
-          attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'open'],
+          attributeFilter: ['hidden', 'aria-hidden', 'class', 'style', 'open'],
         })
         this.observedRoots.add(target)
       }
@@ -1300,15 +1100,9 @@ export class PageTranslator {
           ? (record.target as Element)
           : record.target.parentElement
       if (!target || target.closest('[data-lens-ignore]')) continue
-
-      // Class/style flips on <html>/<body> (SPA theming, scroll-state classes)
-      // carry no new text — treating them as dirty roots forces a full-document
-      // rescan on every toggle.
-      if (
-        record.type === 'attributes' &&
-        (target === document.body || target === document.documentElement) &&
-        (record.attributeName === 'class' || record.attributeName === 'style')
-      ) {
+      if (record.type === 'attributes') {
+        this.dirtyRoots.add(target)
+        relevant = true
         continue
       }
 
@@ -1321,13 +1115,33 @@ export class PageTranslator {
       }
 
       if (record.type === 'childList') {
+        // Frameworks (React reconciliation on X) may strip our inserted
+        // translation node while keeping the host. Re-translate that host on
+        // the next scan; the churn cap stops sites that keep removing it.
+        for (const node of record.removedNodes) {
+          if (node.nodeType !== 1 || !(node as Element).hasAttribute(INSERTED_ATTR)) continue
+          const host = this.hostByInsertedNode.get(node as Element)
+          if (!host) continue
+          const source = host.getAttribute(PAGE_SOURCE_ATTR) ?? ''
+          const suppressed = this.recordTranslationRemoval(host)
+          this.invalidateHost(host)
+          if (suppressed) {
+            // Stop fighting a framework over unchanged source, but allow a
+            // recycled node to translate again when its actual text changes.
+            this.attemptedTextByHost.set(host, source)
+          } else {
+            this.dirtyRoots.add(host.parentElement ?? host)
+            relevant = true
+          }
+        }
+
         const changed = [...record.addedNodes, ...record.removedNodes]
         if (changed.length > 0 && changed.every((node) => this.isOwnNode(node))) continue
 
         // Virtualized feeds (X timeline, Reddit, infinite lists) constantly
         // mount/unmount feed items as the user scrolls. Treating every recycler
         // mutation as a dirty *parent* forces a full-container rescan on every
-        // scroll tick, which re-translates items, inflates ::after heights, and
+        // scroll tick, which re-translates items, inflates their heights, and
         // trips the recycler again — a layout-thrash loop.
         //
         // Instead, when the mutation happens inside a virtual scroller, only
@@ -1353,10 +1167,9 @@ export class PageTranslator {
       }
 
       const translatedHost = target.closest(`[${TRANSLATED_ATTR}]`)
-      if (translatedHost && record.type === 'attributes') continue
       if (translatedHost) {
         const source = translatedHost.getAttribute(PAGE_SOURCE_ATTR) ?? ''
-        if (normalizeText(elementText(translatedHost)) === source) continue
+        if (pageSourceText(translatedHost) === source) continue
         if (this.markChurnAndMaybeVolatile(translatedHost)) {
           // Host changes too often to be worth translating: restore the original
           // text and stop tracking it so we never loop on it again.
@@ -1371,7 +1184,10 @@ export class PageTranslator {
       this.dirtyRoots.add(target.parentElement ?? target)
       relevant = true
     }
-    if (relevant) this.scheduleScan()
+    if (relevant) {
+      this.onLayoutChange()
+      this.scheduleScan()
+    }
   }
 
   /**
@@ -1420,12 +1236,8 @@ export class PageTranslator {
 
   private invalidateHost(host: Element): void {
     this.alignment.unregister(host)
-    this.removeOverlayForHost(host)
+    this.removeInsertedNodeForHost(host)
     host.removeAttribute(TRANSLATED_ATTR)
-    host.removeAttribute(TRANSLATION_TEXT_ATTR)
-    host.removeAttribute(UI_TRANSLATION_ATTR)
-    host.removeAttribute(UI_STACKED_TRANSLATION_ATTR)
-    host.removeAttribute(UI_CONTROL_TRANSLATION_ATTR)
     this.translatedHosts.delete(host)
     const previous = this.sourceHosts.get(host)
     if (previous === null) host.removeAttribute(PAGE_SOURCE_ATTR)
@@ -1440,24 +1252,25 @@ export class PageTranslator {
       if (host.isConnected) continue
       this.invalidateHost(host)
     }
-    for (const host of this.pendingHosts) {
-      if (!host.isConnected) this.clearHostPending(host)
-    }
-    // Overlay elements whose host was invalidated above are already removed;
-    // sweep any strays (e.g. host re-parented under a different scroller).
-    for (const [host, overlay] of this.overlayByHost) {
-      if (!host.isConnected || !overlay.isConnected) this.removeOverlayForHost(host)
+    // Sweep inserted nodes the page detached without us seeing the mutation
+    // (e.g. removed while the tab was hidden): re-translate their hosts.
+    for (const [host, node] of [...this.insertedNodeByHost]) {
+      if (node.isConnected || !host.isConnected) continue
+      this.invalidateHost(host)
+      this.dirtyRoots.add(host.parentElement ?? host)
     }
   }
 
   private scheduleScan(delay = 250): void {
-    window.clearTimeout(this.mutationTimer)
+    // Throttle, don't debounce: X and other live pages mutate continuously.
+    // Resetting this timer on every mutation starves the scan forever.
+    if (this.mutationTimer) return
     this.mutationTimer = window.setTimeout(() => {
+      this.mutationTimer = 0
       if (!this.active || !this.currentSettings) return
       void this.scanAndTranslate(this.currentSettings, this.generation)
     }, delay)
   }
-
   private scheduleInitialRetry(generation: number): void {
     window.clearTimeout(this.initialRetryTimer)
     this.initialRetryTimer = window.setTimeout(() => {
@@ -1471,7 +1284,7 @@ export class PageTranslator {
   }
 
   /**
-   * Translations render as block-level ::after content, so every render batch and
+   * Translations render as real inserted blocks, so every render batch and
    * the final teardown shift all content below them. Chrome's native scroll
    * anchoring is suppressed when many nodes change at once, so re-measure the
    * reader's anchor after the frame and cancel the drift ourselves. If native
@@ -1514,8 +1327,7 @@ export class PageTranslator {
         if (position === 'fixed' || position === 'sticky') continue
         // Skip elements inside virtualized scrollers: the recycler may swap or
         // recycle them before rAF fires, making the measured delta bogus and
-        // causing the viewport to jump. Overlay-rendered hosts there do not
-        // inflate the document flow anyway, so no anchor compensation is needed.
+        // causing the viewport to jump.
         if (findVirtualScrollAncestor(el)) continue
         return { el, top: el.getBoundingClientRect().top, at: Date.now() }
       }
@@ -1547,14 +1359,10 @@ export class PageTranslator {
       style.setAttribute('data-lens-ignore', '')
       ;(document.head ?? document.documentElement).append(style)
     }
-    // Body's real text color feeds translation-only ::after (see pageStyles).
-    try {
-      const bodyColor = getComputedStyle(document.body ?? document.documentElement).color
-      if (bodyColor) document.documentElement.style.setProperty('--lens-page-body-color', bodyColor)
-    } catch {
-      // Keep the stylesheet's safe fallback.
-    }
     style.textContent = pageStyles(settings)
+    for (const shadowStyle of this.shadowStyles.values()) {
+      shadowStyle.textContent = style.textContent
+    }
   }
 
   private lastStatusText = ''

@@ -20,10 +20,11 @@ describe('DEFAULT_SETTINGS', () => {
     expect(DEFAULT_SETTINGS.onboardingCompleted).toBe(false)
     expect(DEFAULT_SETTINGS.pageTranslationFontFamily).toBe('system')
     expect(DEFAULT_SETTINGS.pageTranslationFontSizePx).toBe(14)
+    expect(DEFAULT_SETTINGS.pageTranslationUseOriginalFontSize).toBe(true)
     expect(DEFAULT_SETTINGS.pageTranslationUseCustomColor).toBe(false)
     expect(DEFAULT_SETTINGS.pageTranslationUseBackground).toBe(false)
     expect(DEFAULT_SETTINGS.lensWidthPx).toBe(320)
-    expect(DEFAULT_SETTINGS.minTextLength).toBe(10)
+    expect(DEFAULT_SETTINGS.minTextLength).toBe(3)
     expect(DEFAULT_SETTINGS.batchCharLimit).toBe(6000)
     expect(DEFAULT_SETTINGS.hotkey).toEqual({
       altKey: true,
@@ -44,6 +45,13 @@ describe('DEFAULT_SETTINGS', () => {
 })
 
 describe('mergeSettings', () => {
+  it('migrates font sizing without overriding an explicit saved choice', () => {
+    expect(mergeSettings({}).pageTranslationUseOriginalFontSize).toBe(true)
+    expect(mergeSettings({ pageTranslationFontSizePx: 14 }).pageTranslationUseOriginalFontSize).toBe(true)
+    expect(mergeSettings({ pageTranslationFontSizePx: 18 }).pageTranslationUseOriginalFontSize).toBe(false)
+    expect(mergeSettings({ pageTranslationFontSizePx: 14, pageTranslationUseOriginalFontSize: false }).pageTranslationUseOriginalFontSize).toBe(false)
+    expect(mergeSettings({ pageTranslationFontSizePx: 18, pageTranslationUseOriginalFontSize: true }).pageTranslationUseOriginalFontSize).toBe(true)
+  })
   it('fills missing fields from defaults', () => {
     const merged = mergeSettings({ apiKey: 'sk-test' })
     expect(merged.apiKey).toBe('sk-test')

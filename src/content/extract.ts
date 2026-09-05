@@ -2,6 +2,7 @@ import { makeBlockId } from '../shared/block-id'
 import { isTranslatableText, normalizeText } from '../shared/text'
 
 export const PAGE_SOURCE_ATTR = 'data-lens-translator-source'
+export const PAGE_SEGMENT_ATTR = 'data-lens-page-segment'
 
 /**
  * Primary block-level candidates: HTML semantics + common rich-text / markdown hosts.
@@ -25,7 +26,6 @@ const SEMANTIC_TAGS = [
   'dt',
   'dd',
   'summary',
-  'label',
   'legend',
   'address',
   // Less common but real content
@@ -40,16 +40,25 @@ const ROLE_SELECTORS = [
   '[role="paragraph"]',
   '[role="article"]',
   '[role="text"]',
+]
+
+const UI_PLACEHOLDER_SELECTOR =
+  '[class*="DraftEditorPlaceholder"], [class*="EditorPlaceholder"], [class*="editor-placeholder"]'
+
+const UI_LABEL_SELECTOR = [
+  'a',
+  'button',
+  'label',
+  'summary',
+  '[role="button"]',
+  '[role="link"]',
   '[role="tab"]',
   '[role="menuitem"]',
   '[role="menuitemradio"]',
+  '[role="menuitemcheckbox"]',
   '[role="option"]',
-  '[role="button"]',
-  '[role="link"]',
-]
-
-/** Short UI labels (tabs, menu items) use a lower min length. */
-export const UI_LABEL_MIN_LENGTH = 2
+  '[role="switch"]',
+].join(', ')
 
 /**
  * Host surfaces that usually contain markdown / rich HTML.
@@ -152,10 +161,7 @@ export const PHRASING_TAGS = new Set([
   'msub',
 ])
 
-/**
- * Hard skip ancestors (noise chrome).
- * Intentionally NOT including button / tablist — tabs & labeled buttons are learnable UI text.
- */
+/** Hard skip ancestors containing no safe visible text. Page chrome itself is translatable. */
 const SKIP_CLOSEST =
   [
     'script',
@@ -172,24 +178,14 @@ const SKIP_CLOSEST =
     'textarea',
     'input',
     'select',
-    // keep option for <select> menus only via closest select above
-    'nav',
-    'pre', // fenced code / preformatted — usually not continuous reading target
     '[contenteditable]:not([contenteditable="false"])',
     '[role="textbox"]',
-    // Rich-text editor placeholders (Draft.js/ProseMirror/etc.) sit *beside* the
-    // editable node, so the contenteditable skip above misses them. They vanish the
-    // moment the user types, so translating them only leaves stray, misaligned text.
-    '[class*="DraftEditorPlaceholder"]',
-    '[class*="EditorPlaceholder"]',
-    '[class*="editor-placeholder"]',
+    UI_PLACEHOLDER_SELECTOR,
     '[aria-hidden="true"]',
-    '[role="navigation"]',
-    '[role="banner"]',
-    '[role="search"]',
-    '[role="toolbar"]',
-    // Transient overlays positioned over other content; an injected ::after here
-    // lands on top of whatever the tooltip points at (e.g. GitHub's <tool-tip>).
+    '[class*="author-name"]',
+    '[data-testid="User-Name"]',
+    // Transient overlays positioned over other content; an inserted translation
+    // would cover whatever the tooltip points at (e.g. GitHub's <tool-tip>).
     '[role="tooltip"]',
     'tool-tip',
     '[data-lens-ignore]',
@@ -232,6 +228,8 @@ export type ExtractedBlock = {
   el: Element
   tag: string
   text: string
+  /** Direct sibling nodes forming one paragraph separated by <br><br>. */
+  segmentNodes?: Node[]
 }
 
 export function coarsePath(el: Element): string {
@@ -273,29 +271,30 @@ function isRendered(el: Element, rect = el.getBoundingClientRect()): boolean {
 }
 
 /** Subtrees whose text must never be translated even when nested inside a content block. */
-const NON_CONTENT_TEXT_TAGS = new Set(['script', 'style', 'noscript', 'template'])
+const NON_CONTENT_TEXT_TAGS = new Set(['script', 'style', 'noscript', 'template', 'svg'])
+const NON_CONTENT_TEXT_SELECTOR =
+  'script, style, noscript, template, svg, [data-lens-ignore]'
 
 /**
- * Element text excluding embedded non-rendered content.
+ * Element text excluding embedded non-content and translator-owned subtrees.
  *
- * `Element.textContent` concatenates the text of <script>/<style>/<template>/<noscript>
- * descendants. Many sites embed machine-readable JSON next to visible UI (e.g. GitHub puts
- * subscription props in a <script type="application/json"> beside the "Watch" button). That
- * leaked JSON otherwise reaches the model and comes back as garbled translation, so we walk
- * text nodes and skip those subtrees.
+ * `Element.textContent` concatenates script/style/template payloads and our
+ * inserted translations. Feeding either back into extraction corrupts the
+ * source text and can recursively translate a whole parent container.
  *
  * `maxChars` stops the walk early (returning an over-limit string). For threshold
  * checks only — e.g. the lens rejects blocks over 4000 chars, so walking a huge
  * SPA root per mousemove frame just to learn "too big" was pure GC churn.
  */
 export function elementText(el: Element, maxChars?: number): string {
+  if (el.hasAttribute?.('data-lens-ignore')) return ''
   const canWalk =
     typeof document !== 'undefined' && typeof document.createTreeWalker === 'function'
   if (
     !canWalk ||
     (maxChars === undefined &&
       (typeof el.querySelector !== 'function' ||
-        !el.querySelector('script, style, noscript, template')))
+        !el.querySelector(NON_CONTENT_TEXT_SELECTOR)))
   ) {
     const text = el.textContent ?? ''
     return maxChars !== undefined && text.length > maxChars ? text.slice(0, maxChars) : text
@@ -304,7 +303,10 @@ export function elementText(el: Element, maxChars?: number): string {
     acceptNode(node) {
       let ancestor = node.parentElement
       while (ancestor && ancestor !== el) {
-        if (NON_CONTENT_TEXT_TAGS.has(ancestor.tagName.toLowerCase())) {
+        if (
+          NON_CONTENT_TEXT_TAGS.has(ancestor.tagName.toLowerCase()) ||
+          ancestor.hasAttribute?.('data-lens-ignore')
+        ) {
           return 2 // FILTER_REJECT
         }
         ancestor = ancestor.parentElement
@@ -322,9 +324,45 @@ export function elementText(el: Element, maxChars?: number): string {
   return text
 }
 
+/** One source traversal for extraction, mutation checks, and highlight offsets. */
+export function* pageSourceTextNodes(root: Element): Generator<{ node: Text; separator: boolean }> {
+  let separator = false
+  function* visit(node: Node): Generator<{ node: Text; separator: boolean }> {
+    if (node.nodeType === 3) {
+      if (node.textContent?.trim()) {
+        yield { node: node as Text, separator }
+        separator = false
+      } else if (node.textContent) separator = true
+      return
+    }
+    if (node.nodeType !== 1) return
+    const el = node as Element
+    if (el.matches(SKIP_CLOSEST)) return
+    const display = window.getComputedStyle(el).display
+    if (display === 'none') return
+    const boundary = el.tagName === 'BR' || /^(block|flow-root|list-item|table|flex|grid)/.test(display)
+    if (boundary) separator = true
+    for (const child of el.childNodes) yield* visit(child)
+    if (boundary) separator = true
+  }
+  yield* visit(root)
+}
+
+export function pageSourceText(el: Element): string {
+  // Geometry-free consumers can still provide plain element text.
+  if (!el.ownerDocument?.createTreeWalker) {
+    return normalizeText((el as HTMLElement).innerText ?? elementText(el))
+  }
+  let text = ''
+  for (const part of pageSourceTextNodes(el)) {
+    text += (part.separator ? ' ' : '') + part.node.data
+  }
+  return normalizeText(text)
+}
+
 function sourceTextOf(el: Element): string {
   const stored = el.getAttribute(PAGE_SOURCE_ATTR)
-  return normalizeText(stored ?? elementText(el))
+  return stored !== null ? normalizeText(stored) : pageSourceText(el)
 }
 
 export function isPhrasingOnly(el: Element): boolean {
@@ -402,24 +440,44 @@ function hasMultipleUiLabelDescendants(el: Element): boolean {
  */
 export function isUiLabelElement(el: Element): boolean {
   const role = (el.getAttribute('role') || '').toLowerCase()
+  const tag = el.tagName.toLowerCase()
+  const containingControl = el.closest(UI_LABEL_SELECTOR)
+  if (
+    containingControl &&
+    containingControl !== el &&
+    isUiLabelElement(containingControl)
+  ) {
+    return true
+  }
+  const embeddedLink =
+    (tag === 'a' || role === 'link') &&
+    (Boolean(el.closest('p, blockquote, td, th, h1, h2, h3, h4, h5, h6')) ||
+      (Boolean(el.closest('li')) && !el.closest('nav, [role="navigation"], [role="menu"]')))
+  if (embeddedLink) return false
+  if (tag === 'a' || role === 'link') {
+    // A clickable card is a container, not a control label. Keep its title and
+    // metadata as separate reading rows, even when it has role="link".
+    const rows = [...el.querySelectorAll('div, p, h1, h2, h3, h4, h5, h6')]
+      .filter(child => isPhrasingOnly(child) && normalizeText(elementText(child)))
+    if (sourceTextOf(el).length > 80 || rows.length > 1) return false
+  }
   if (
     role === 'tab' ||
     role === 'menuitem' ||
     role === 'menuitemradio' ||
+    role === 'menuitemcheckbox' ||
     role === 'option' ||
     role === 'button' ||
-    role === 'link'
+    role === 'link' ||
+    role === 'switch'
   ) {
     return true
   }
-  const tag = el.tagName.toLowerCase()
-  if (tag === 'button' || tag === 'summary') return true
-  // Anchor used as tab/chip with short label
+  if (tag === 'button' || tag === 'summary' || tag === 'label') return true
+  // Short anchors are navigation/chip labels even when an icon wrapper is block-like.
   if (tag === 'a') {
     const text = sourceTextOf(el)
-    if (text.length > 0 && text.length <= 48 && (isPhrasingOnly(el) || el.children.length === 0)) {
-      return true
-    }
+    if (text.length > 0 && text.length <= 48) return true
   }
   // Div/span chips inside a tablist
   if (
@@ -433,6 +491,23 @@ export function isUiLabelElement(el: Element): boolean {
   return false
 }
 
+/** Put compact translations beside the label, not beside its icon or wrapper. */
+function uiTextHost(el: Element): Element {
+  const walker = el.ownerDocument?.createTreeWalker?.(el, 4)
+  if (!walker) return el
+  let label: Element | null = null
+  let node = walker.nextNode()
+  while (node) {
+    const parent = node.parentElement
+    if (parent && normalizeText(node.textContent ?? '') && !parent.closest(SKIP_CLOSEST)) {
+      if (label && label !== parent) return el
+      label = parent
+    }
+    node = walker.nextNode()
+  }
+  return label ?? el
+}
+
 /**
  * Leaf-ish container: enough text, not a huge multi-block shell.
  * Used for div/span/section/article/custom elements + UI labels.
@@ -440,13 +515,6 @@ export function isUiLabelElement(el: Element): boolean {
 export function isLeafTextContainer(el: Element, minTextLength: number): boolean {
   const tag = el.tagName.toLowerCase()
   const text = sourceTextOf(el)
-
-  // UI labels (tabs, buttons): lower length threshold
-  if (isUiLabelElement(el)) {
-    const min = Math.min(UI_LABEL_MIN_LENGTH, minTextLength)
-    return isTranslatableText(text, min) && text.length <= 80
-  }
-
   if (SKIP_SELF_TAGS.has(tag)) return false
 
   if (!isTranslatableText(text, minTextLength)) return false
@@ -473,8 +541,6 @@ export function isLeafTextContainer(el: Element, minTextLength: number): boolean
 }
 
 function shouldSkipAsNestedContainer(el: Element, minTextLength: number): boolean {
-  // UI labels are always leaves
-  if (isUiLabelElement(el)) return false
   // If this node contains multiple semantic blocks, prefer the children
   const count = childSemanticCount(el)
   if (count > 1) {
@@ -485,24 +551,30 @@ function shouldSkipAsNestedContainer(el: Element, minTextLength: number): boolea
   return false
 }
 
-function shouldSkipElement(el: Element): boolean {
+function shouldSkipElement(el: Element, allowSegmentContainer = false): boolean {
   if (el.closest('#lens-translator-root')) return true
+  const redditComment = el.closest('shreddit-comment')
+  if (redditComment) {
+    const commentContent = el.closest('[slot="comment"]')
+    const actionRow = el.closest(
+      'shreddit-comment-action-row, [slot="comment-action-row"], [slot="actionRow"]',
+    )
+    if (
+      (!commentContent || commentContent.closest('shreddit-comment') !== redditComment) &&
+      !actionRow
+    ) {
+      return true
+    }
+  }
   if (
-    !el.hasAttribute(PAGE_SOURCE_ATTR) &&
-    el.querySelector('[data-lens-page-translation]')
+    !allowSegmentContainer && !el.hasAttribute(PAGE_SOURCE_ATTR) &&
+    el.querySelector('[data-lens-page-inserted]')
   ) {
     return true
   }
+  if (el.parentElement?.closest('[data-lens-page-translated]')) return true
   if (el.hasAttribute('hidden')) return true
   if (el.getAttribute('aria-hidden') === 'true') return true
-
-  // Learnable UI labels: only skip true noise ancestors
-  if (isUiLabelElement(el)) {
-    if (el.closest('script, style, noscript, template, textarea, input, select, svg, canvas')) {
-      return true
-    }
-    return false
-  }
 
   if (el.closest(SKIP_CLOSEST)) return true
   const tag = el.tagName.toLowerCase()
@@ -526,15 +598,13 @@ function collectCandidates(root: ParentNode = document): Element[] {
   // 1) Semantic HTML
   addAll(root.querySelectorAll(SEMANTIC_TAGS.join(',')))
 
-  // 2) ARIA roles (incl. tabs / menuitems)
+  // 2) ARIA content roles
   addAll(root.querySelectorAll(ROLE_SELECTORS.join(',')))
+  // Short controls need their own hosts so translations stay inside the control
+  // instead of becoming detached blocks after an entire toolbar or menu.
+  addAll(root.querySelectorAll(UI_LABEL_SELECTOR))
+  addAll(root.querySelectorAll(`[${PAGE_SEGMENT_ATTR}]`))
 
-  // 2b) Tab strips & plain buttons / chip links (POWERSHELL, CURL, …)
-  addAll(root.querySelectorAll('button, [role="tablist"] button, [role="tablist"] a, [role="tablist"] [role="tab"]'))
-  addAll(root.querySelectorAll('[role="tablist"] > *, [role="tablist"] [role="presentation"] > *'))
-
-  // 2c) Plain navigation links often have no ARIA role and must stay row-level.
-  addAll(root.querySelectorAll('a, [role="link"]'))
 
   // 3) Inside rich hosts: also grab direct leaf-ish children (div/span)
   for (const host of root.querySelectorAll(RICH_HOST_SELECTORS.join(','))) {
@@ -564,16 +634,6 @@ function collectCandidates(root: ParentNode = document): Element[] {
     ),
   )
 
-  // 5) Generic leaves: div/span/section/article + custom elements (sampled via query)
-  addAll(root.querySelectorAll('div, span, section, article, main'))
-  // Custom elements require a full-tree query; this path is reserved for debounced auto scans.
-  for (const el of root.querySelectorAll('*')) {
-    if (el.tagName.includes('-') && !seen.has(el)) {
-      seen.add(el)
-      list.push(el)
-    }
-  }
-
   return list
 }
 
@@ -582,6 +642,9 @@ function extractCandidate(
   minTextLength: number,
   prefetchMarginPx: number | null,
 ): ExtractedBlock | undefined {
+  const uiLabel = isUiLabelElement(el)
+  if (uiLabel) el = uiTextHost(el)
+  const textMinLength = uiLabel ? 1 : minTextLength
   if (
     shouldSkipElement(el) ||
     (prefetchMarginPx === null ? !isRendered(el) : !isVisible(el, prefetchMarginPx))
@@ -592,31 +655,129 @@ function extractCandidate(
   const tag = el.tagName.toLowerCase()
   const isSemantic = (SEMANTIC_TAGS as readonly string[]).includes(tag)
   const role = el.getAttribute('role') || ''
+  // A horizontal row carrying several text-bearing children is a tab strip or
+  // toolbar; its items are UI labels, not prose (HF's "Discussions / Pull
+  // requests" tabs, checkbox labels). Single-text rows (truncated titles) pass.
+  const parent = el.parentElement
+  if (
+    !uiLabel &&
+    parent &&
+    typeof window !== 'undefined' &&
+    typeof window.getComputedStyle === 'function'
+  ) {
+    const parentStyle = window.getComputedStyle(parent)
+    if (parentStyle.display?.includes('flex') && parentStyle.flexDirection?.startsWith('row')) {
+      let textCarriers = 0
+      for (const child of parent.children) {
+        if (normalizeText(elementText(child)).length > 0) textCarriers++
+        if (textCarriers > 1) return undefined
+      }
+    }
+  }
   const isRoleBlock =
     role === 'heading' ||
     role === 'listitem' ||
     role === 'paragraph' ||
-    role === 'text' ||
-    role === 'tab' ||
-    role === 'menuitem' ||
-    role === 'button' ||
-    role === 'link'
-  const isUi = isUiLabelElement(el)
-  const minLength = isUi ? Math.min(UI_LABEL_MIN_LENGTH, minTextLength) : minTextLength
+    role === 'text'
 
-  if (isUi) {
-    if (!isLeafTextContainer(el, minTextLength)) return undefined
-  } else if (isSemantic || isRoleBlock) {
+  if (isSemantic || isRoleBlock) {
     const text = sourceTextOf(el)
-    if (!isTranslatableText(text, minLength)) return undefined
+    if (!isTranslatableText(text, textMinLength)) return undefined
     if (shouldSkipAsNestedContainer(el, minTextLength)) return undefined
-  } else if (!isLeafTextContainer(el, minTextLength)) {
+    // Article shells with action controls are containers, not prose. A <li>
+    // with several links is still prose unless it belongs to navigation.
+    if (
+      hasMultipleUiLabelDescendants(el) &&
+      (tag === 'article' ||
+        (tag === 'li' &&
+          Boolean(el.closest('nav, aside, [role="navigation"], [role="complementary"]'))))
+    ) {
+      return undefined
+    }
+  } else if (!uiLabel && !isLeafTextContainer(el, textMinLength)) {
     return undefined
   }
 
   const text = sourceTextOf(el)
-  if (!isTranslatableText(text, minLength)) return undefined
+  if (!isTranslatableText(text, textMinLength)) return undefined
   return { id: makeBlockId(tag, text, coarsePath(el)), el, tag, text }
+}
+
+/**
+ * Some CMS pages encode several paragraphs as one semantic element separated
+ * only by <br><br>. Return each paragraph with the nodes the renderer must wrap
+ * into its own source host; otherwise all translations land after the group.
+ */
+function extractHardBreakSegments(
+  el: Element,
+  minTextLength: number,
+  prefetchMarginPx: number | null,
+): ExtractedBlock[] | null {
+  const secondBreak = el.querySelector('br + br')
+  if (!secondBreak) return null
+  if (
+    shouldSkipElement(el, true) ||
+    (prefetchMarginPx === null ? !isRendered(el) : !isVisible(el, prefetchMarginPx))
+  ) {
+    return []
+  }
+
+  const container = secondBreak.parentElement
+  if (!container) return null
+  const nodes = [...container.childNodes]
+  const groups: Node[][] = []
+  let start = 0
+  for (let index = 0; index < nodes.length - 1; index++) {
+    if (
+      nodes[index].nodeType === 1 &&
+      (nodes[index] as Element).tagName.toLowerCase() === 'br' &&
+      nodes[index + 1].nodeType === 1 &&
+      (nodes[index + 1] as Element).tagName.toLowerCase() === 'br'
+    ) {
+      groups.push(nodes.slice(start, index))
+      index++
+      start = index + 1
+    }
+  }
+  groups.push(nodes.slice(start))
+
+  const tag = el.tagName.toLowerCase()
+  const blocks: ExtractedBlock[] = []
+  for (const group of groups) {
+    const sourceNodes = group.filter(
+      (node) =>
+        !(
+          node.nodeType === 1 &&
+          (node as Element).hasAttribute?.('data-lens-ignore')
+        ),
+    )
+    const existing = sourceNodes.find(
+      (node) =>
+        node.nodeType === 1 &&
+        (node as Element).hasAttribute?.(PAGE_SEGMENT_ATTR),
+    ) as Element | undefined
+    if (existing) {
+      const block = extractCandidate(existing, minTextLength, prefetchMarginPx)
+      if (block) blocks.push(block)
+      continue
+    }
+    const text = normalizeText(sourceNodes.map((node) => node.textContent ?? '').join(''))
+    if (!isTranslatableText(text, minTextLength)) continue
+    const anchor =
+      (sourceNodes.find(
+        (node) =>
+          node.nodeType === 1 &&
+          (node as Element).tagName.toLowerCase() !== 'br',
+      ) as Element | undefined) ?? secondBreak
+    blocks.push({
+      id: makeBlockId(tag, text, coarsePath(anchor)),
+      el: anchor,
+      tag,
+      text,
+      segmentNodes: sourceNodes,
+    })
+  }
+  return blocks.length >= 2 ? blocks : null
 }
 
 // ---------------------------------------------------------------------------
@@ -891,22 +1052,28 @@ export function extractPageBlocks(
 ): ExtractedBlock[] {
   const roots = collectPageRoots(root)
   const semanticBlocks = roots.flatMap((root) => extractBlocks(root, minTextLength, null))
-  const coveredElements = new Set(semanticBlocks.map((block) => block.el))
+  const coveredElements = new Set(
+    semanticBlocks.map((block) => block.segmentNodes?.[0]?.parentElement ?? block.el),
+  )
   const fallbackBlocks = roots.flatMap((root) =>
     extractTextNodeFallbacks(root, minTextLength, coveredElements),
   )
-  return [...semanticBlocks, ...fallbackBlocks]
+  return dedupeNestedBlocks([...semanticBlocks, ...fallbackBlocks])
 }
 
 /** Include open web-component roots; closed shadow roots are inaccessible by platform design. */
 export function collectPageRoots(root: ParentNode = document): ParentNode[] {
   const roots: ParentNode[] = [root]
-  if ('shadowRoot' in root && (root as Element).shadowRoot) {
+  if (
+    'shadowRoot' in root &&
+    (root as Element).shadowRoot &&
+    !shouldSkipElement(root as Element)
+  ) {
     roots.push((root as Element).shadowRoot!)
   }
   for (let index = 0; index < roots.length; index++) {
     for (const el of roots[index].querySelectorAll('*')) {
-      if (el.shadowRoot) roots.push(el.shadowRoot)
+      if (el.shadowRoot && !shouldSkipElement(el)) roots.push(el.shadowRoot)
     }
   }
   return roots
@@ -944,7 +1111,7 @@ function extractTextNodeFallbacks(
   minTextLength: number,
   coveredElements: Set<Element>,
 ): ExtractedBlock[] {
-  const textByHost = new Map<Element, string[]>()
+  const hosts = new Set<Element>()
   const walker = document.createTreeWalker(root, 4)
   let node = walker.nextNode()
 
@@ -952,24 +1119,64 @@ function extractTextNodeFallbacks(
     const textNode = node as Text
     const text = normalizeText(textNode.data)
     const parent = textNode.parentElement
-    if (text && parent && !hasCoveredAncestor(parent, coveredElements)) {
+    if (
+      text &&
+      parent &&
+      !parent.closest?.('[data-lens-ignore]') &&
+      !hasCoveredAncestor(parent, coveredElements)
+    ) {
       const host = fallbackHostForTextNode(textNode)
       if (host && !shouldSkipElement(host)) {
-        const parts = textByHost.get(host) ?? []
-        parts.push(text)
-        textByHost.set(host, parts)
+        hosts.add(host)
       }
     }
     node = walker.nextNode()
   }
 
   const blocks: ExtractedBlock[] = []
-  for (const [el, parts] of textByHost) {
+  for (const el of hosts) {
     if (!isRendered(el)) continue
-    const text = normalizeText(parts.join(' '))
-    const min = isUiLabelElement(el) ? Math.min(UI_LABEL_MIN_LENGTH, minTextLength) : minTextLength
-    if (!isTranslatableText(text, min)) continue
+    // A fallback still owns its entire host. Partial text here would disagree
+    // with mutation validation and overlap semantic descendants on rescans.
+    const text = sourceTextOf(el)
+    if (!isTranslatableText(text, minTextLength)) continue
     const tag = el.tagName.toLowerCase()
+    // Some markdown renderers emit numbered prose as a bare <ul>/<ol> text
+    // node with no <li> children (arXiv operational guidelines). Treat only
+    // that malformed leaf-list shape as a block; normal lists still use <li>.
+    const isBareTextList =
+      (tag === 'ul' || tag === 'ol') && !el.querySelector('li, ul, ol')
+    // Only block-ish wrappers are reading units; anything else (flex rows,
+    // chips) is UI chrome the generic walker latched onto.
+    if (
+      tag !== 'div' &&
+      tag !== 'section' &&
+      tag !== 'article' &&
+      !isBareTextList
+    ) {
+      continue
+    }
+    // Multi-control wrappers are menus/toolbars. Only a real article with
+    // substantial prose may also contain its action buttons.
+    if (
+      hasMultipleUiLabelDescendants(el) &&
+      (!el.matches('article, [role="article"]') || text.length < 20)
+    ) {
+      continue
+    }
+    // A horizontal row (or a direct item of one) is a toolbar / tab strip,
+    // not a reading unit — the same physical check the renderer relies on.
+    if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+      const own = window.getComputedStyle(el)
+      if (own.display?.includes('flex') && own.flexDirection?.startsWith('row')) continue
+      const parent = el.parentElement
+      if (parent) {
+        const parentStyle = window.getComputedStyle(parent)
+        if (parentStyle.display?.includes('flex') && parentStyle.flexDirection?.startsWith('row')) {
+          continue
+        }
+      }
+    }
     const block = { id: makeBlockId(tag, text, coarsePath(el)), el, tag, text }
     blocks.push(block)
     coveredElements.add(el)
@@ -983,45 +1190,90 @@ function extractBlocks(
   prefetchMarginPx: number | null,
 ): ExtractedBlock[] {
   const candidates = collectCandidates(root)
+  // querySelectorAll never matches the root itself — a dirty root enqueued from
+  // a mutation IS the newly added element, so check it as a candidate too.
+  if (typeof Element !== 'undefined' && root instanceof Element) candidates.unshift(root)
   const out: ExtractedBlock[] = []
   const seenIds = new Set<string>()
-  const seenEls = new Set<Element>()
+  const seenEls = new Set<Node>()
 
   for (const el of candidates) {
     if (seenEls.has(el)) continue
-    const block = extractCandidate(el, minTextLength, prefetchMarginPx)
-    if (!block || seenIds.has(block.id)) continue
-
-    seenIds.add(block.id)
-    seenEls.add(block.el)
-    out.push(block)
+    const splitBlocks = extractHardBreakSegments(el, minTextLength, prefetchMarginPx)
+    const blocks =
+      splitBlocks ??
+      [extractCandidate(el, minTextLength, prefetchMarginPx)].filter(
+        (block): block is ExtractedBlock => block !== undefined,
+      )
+    for (const block of blocks) {
+      const source = block.segmentNodes?.[0] ?? block.el
+      if (seenIds.has(block.id) || seenEls.has(source)) continue
+      seenIds.add(block.id)
+      seenEls.add(source)
+      out.push(block)
+    }
   }
 
   // Drop parent blocks that fully contain a smaller registered child (same text prefix noise)
   return dedupeNestedBlocks(out)
 }
 
-/** Remove outer wrappers when a nested block already covers the same reading unit. */
+/**
+ * Remove outer wrappers when nested blocks already cover the same reading unit.
+ *
+ * Prose owns its inline links. Structural wrappers yield to their leaves only
+ * when those leaves cover all meaningful text; even a short introduction must
+ * survive. Finally remove descendants of every retained owner.
+ */
 export function dedupeNestedBlocks(blocks: ExtractedBlock[]): ExtractedBlock[] {
   if (blocks.length <= 1) return blocks
   const byElement = new Map(blocks.map((block) => [block.el, block]))
   const dominated = new Set<ExtractedBlock>()
+  const inlineReadingUnits = new Set(blocks.filter(block =>
+    (SEMANTIC_TAGS as readonly string[]).includes(block.tag) && isPhrasingOnly(block.el),
+  ))
 
+  // Pass 1: mark every block that owns at least one nested block, so pass 2 can
+  // tell leaves (blocks with no nested blocks) from containers.
+  const hasNestedBlock = new Set<ExtractedBlock>()
   for (const child of blocks) {
     let ancestor = child.el.parentElement
     while (ancestor) {
       const parent = byElement.get(ancestor)
-      if (
-        parent &&
-        child.text.length >= Math.min(parent.text.length * 0.5, parent.text.length - 1) &&
-        (parent.text.length <= child.text.length + 40 ||
-          parent.el.querySelectorAll('p,li,h1,h2,h3,h4,h5,h6').length >= 1)
-      ) {
-        dominated.add(parent)
-        break
+      if (parent) hasNestedBlock.add(parent)
+      ancestor = ancestor.parentElement
+    }
+  }
+
+  // Pass 2: accumulate leaf text coverage into each container. Only leaves
+  // contribute — counting nested intermediates would double-count the same text.
+  const uncovered = new Map<ExtractedBlock, string>()
+  for (const leaf of blocks) {
+    if (hasNestedBlock.has(leaf)) continue
+    let ancestor = leaf.el.parentElement
+    while (ancestor) {
+      const container = byElement.get(ancestor)
+      if (container) {
+        // ponytail: scan small compound blocks per leaf; use DOM ranges if very
+        // large compound blocks make this a measured extraction bottleneck.
+        uncovered.set(container, (uncovered.get(container) ?? container.text).replace(leaf.text, ' '))
       }
       ancestor = ancestor.parentElement
     }
   }
-  return blocks.filter((block) => !dominated.has(block))
+  for (const container of hasNestedBlock) {
+    if (inlineReadingUnits.has(container)) continue
+    if (!/[\p{L}\p{N}]/u.test(uncovered.get(container) ?? container.text)) dominated.add(container)
+  }
+
+  const retained = blocks.filter(block => !dominated.has(block))
+  const owners = new Set(retained.filter(block => !block.segmentNodes).map(block => block.el))
+  return retained.filter(block => {
+    let parent = block.el.parentElement
+    while (parent) {
+      if (owners.has(parent)) return false
+      parent = parent.parentElement
+    }
+    return true
+  })
 }

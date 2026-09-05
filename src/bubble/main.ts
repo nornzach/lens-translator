@@ -185,6 +185,7 @@ function renderSettings(): void {
   el<HTMLSelectElement>('fontFamily').value = settings.pageTranslationFontFamily
   el<HTMLInputElement>('fontSize').value = String(settings.pageTranslationFontSizePx)
   el('fontSizeValue').textContent = `${settings.pageTranslationFontSizePx}px`
+  el<HTMLInputElement>('followFontSize').checked = settings.pageTranslationUseOriginalFontSize
   el<HTMLInputElement>('useTextColor').checked = settings.pageTranslationUseCustomColor
   el<HTMLInputElement>('textColor').value = settings.pageTranslationTextColor
   el<HTMLInputElement>('useBackground').checked = settings.pageTranslationUseBackground
@@ -226,7 +227,7 @@ function renderPreview(): void {
   }[settings.pageTranslationFontFamily]
   Object.assign(preview.style, {
     fontFamily: family,
-    fontSize: `${settings.pageTranslationFontSizePx}px`,
+    fontSize: settings.pageTranslationUseOriginalFontSize ? 'inherit' : `${settings.pageTranslationFontSizePx}px`,
     color: settings.pageTranslationUseCustomColor ? settings.pageTranslationTextColor : '#162033',
     background: settings.pageTranslationUseBackground
       ? settings.pageTranslationBackgroundColor
@@ -252,6 +253,7 @@ function readStyleControls(): void {
       .value as UserSettings['pageTranslationDisplayMode'],
     pageTranslationFontFamily: el<HTMLSelectElement>('fontFamily').value,
     pageTranslationFontSizePx: Number(el<HTMLInputElement>('fontSize').value),
+    pageTranslationUseOriginalFontSize: el<HTMLInputElement>('followFontSize').checked,
     pageTranslationUseCustomColor: el<HTMLInputElement>('useTextColor').checked,
     pageTranslationTextColor: el<HTMLInputElement>('textColor').value,
     pageTranslationUseBackground: el<HTMLInputElement>('useBackground').checked,
@@ -386,7 +388,7 @@ async function init(): Promise<void> {
     })
   }
 
-  for (const id of ['displayMode', 'fontFamily', 'fontSize', 'useTextColor', 'textColor', 'useBackground', 'backgroundColor']) {
+  for (const id of ['displayMode', 'fontFamily', 'fontSize', 'followFontSize', 'useTextColor', 'textColor', 'useBackground', 'backgroundColor']) {
     el(id).addEventListener('input', readStyleControls)
     el(id).addEventListener('change', readStyleControls)
   }

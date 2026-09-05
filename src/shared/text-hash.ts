@@ -1,5 +1,7 @@
 import { normalizeText } from './text'
 
+const TRANSLATION_CACHE_VERSION = 'text-prompt-v2'
+
 /** FNV-1a 32-bit of normalized text → base36 (fast equality key for identical sentences). */
 export function hashNormalizedText(text: string): string {
   const payload = normalizeText(text)
@@ -22,8 +24,9 @@ function hashNormalizedText64(text: string): string {
 }
 
 /**
- * Page-scoped cache key. A 64-bit hash avoids retaining source text in cache
- * keys while making accidental cross-sentence reuse negligibly likely.
+ * Page-scoped, prompt-versioned cache key. A 64-bit hash avoids retaining
+ * source text while making accidental cross-sentence reuse negligibly likely.
+ * Bump the version whenever text-translation semantics change.
  */
 export function makeTranslationCacheKey(
   pageKey: string,
@@ -31,5 +34,5 @@ export function makeTranslationCacheKey(
   targetLang: string,
   text: string,
 ): string {
-  return `${pageKey}|${sourceLang}|${targetLang}|${hashNormalizedText64(text)}`
+  return `${TRANSLATION_CACHE_VERSION}|${pageKey}|${sourceLang}|${targetLang}|${hashNormalizedText64(text)}`
 }

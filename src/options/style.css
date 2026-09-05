@@ -550,6 +550,11 @@ kbd {
   cursor: pointer;
 }
 
+.font-size-option {
+  grid-column: 1 / -1;
+  grid-template-columns: 16px 1fr;
+}
+
 input[type='color'] {
   width: 32px;
   height: 28px;

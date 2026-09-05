@@ -78,6 +78,7 @@ export type ContentSettings = Pick<
   | 'pageTranslationDisplayMode'
   | 'pageTranslationFontFamily'
   | 'pageTranslationFontSizePx'
+  | 'pageTranslationUseOriginalFontSize'
   | 'pageTranslationUseCustomColor'
   | 'pageTranslationTextColor'
   | 'pageTranslationUseBackground'

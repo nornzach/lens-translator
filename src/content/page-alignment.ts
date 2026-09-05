@@ -1,5 +1,6 @@
 import { normalizeText } from '../shared/text'
 import { BrowserTranslator } from './browser-translator'
+import { pageSourceTextNodes } from './extract'
 
 export const PAGE_ALIGNMENT_HIGHLIGHT_NAME = 'lens-page-alignment-match'
 export const PAGE_ALIGNMENT_FALLBACK_ATTR = 'data-lens-page-alignment-source'
@@ -24,7 +25,8 @@ type AlignmentEntry = {
   translation: string
   sourceLanguage: string
   targetLanguage: string
-  isUi: boolean
+  /** The inserted element the translation actually renders in. */
+  translationEl: HTMLElement
   segments: DisplaySegment[]
   wordCount: number
   alignments: Map<number, Promise<SourceSpan | null>>
@@ -49,7 +51,6 @@ type HighlightGlobal = typeof globalThis & {
   Highlight?: new (...ranges: Range[]) => unknown
 }
 
-const TRANSLATED_SELECTOR = '[data-lens-page-translated]'
 const OVERLAY_ID = 'lens-translator-page-alignment-overlay'
 
 function fallbackWordSegments(text: string): WordSegment[] {
@@ -195,8 +196,6 @@ function normalizedTextIndex(host: Element): NormalizedTextIndex {
   const ends: TextPoint[] = []
   let text = ''
   let pendingWhitespace: TextPoint | null = null
-  const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT)
-  let current = walker.nextNode() as Text | null
 
   const append = (value: string, start: TextPoint, end: TextPoint) => {
     text += value
@@ -206,7 +205,8 @@ function normalizedTextIndex(host: Element): NormalizedTextIndex {
     }
   }
 
-  while (current) {
+  for (const { node: current, separator } of pageSourceTextNodes(host)) {
+    if (separator && text && !pendingWhitespace) pendingWhitespace = { node: current, offset: 0 }
     const value = current.data
     for (let offset = 0; offset < value.length; ) {
       const codePoint = value.codePointAt(offset)!
@@ -226,7 +226,6 @@ function normalizedTextIndex(host: Element): NormalizedTextIndex {
       }
       offset += length
     }
-    current = walker.nextNode() as Text | null
   }
   return { text, starts, ends }
 }
@@ -250,11 +249,6 @@ function domRangeForSourceSpan(entry: AlignmentEntry, span: SourceSpan): Range |
   return range
 }
 
-function numericStyle(value: string): number {
-  const number = Number.parseFloat(value)
-  return Number.isFinite(number) ? number : 0
-}
-
 /** Payload offered to the vocabulary notebook when the user stars a hovered word. */
 export type AlignedWordStar = {
   source: string
@@ -266,6 +260,7 @@ export type AlignedWordStar = {
 /** Handles target-word hit testing and source highlighting without mutating source text nodes. */
 export class PageAlignmentController {
   private entries = new WeakMap<Element, AlignmentEntry>()
+  private entryByTranslationEl = new Map<HTMLElement, AlignmentEntry>()
   private readonly translator = new BrowserTranslator()
   private overlay: HTMLDivElement | null = null
   private overlayHost: Element | null = null
@@ -282,10 +277,9 @@ export class PageAlignmentController {
   private pointerFrame = 0
   private pendingPointer: PointerEvent | null = null
   /** Per-host layout measurements, valid until the pointer leaves the host (or scroll/resize). */
-  private measuredHost: Element | null = null
+  private measuredTranslationEl: HTMLElement | null = null
   private measuredTranslationTop = 0
-  private measuredHostTop = 0
-  private measuredPseudoStyle: CSSStyleDeclaration | null = null
+  private measuredTranslationStyle: CSSStyleDeclaration | null = null
 
   activate(): void {
     if (this.active) return
@@ -305,6 +299,7 @@ export class PageAlignmentController {
     this.pendingPointer = null
     this.clearInteraction()
     this.entries = new WeakMap<Element, AlignmentEntry>()
+    this.entryByTranslationEl.clear()
   }
 
   register(
@@ -313,24 +308,28 @@ export class PageAlignmentController {
     translation: string,
     sourceLanguage: string,
     targetLanguage: string,
-    isUi: boolean,
+    translationEl: HTMLElement,
   ): void {
     const segments = segmentDisplayText(translation, targetLanguage)
-    this.entries.set(host, {
+    const entry: AlignmentEntry = {
       host,
       sourceText,
       translation,
       sourceLanguage,
       targetLanguage,
-      isUi,
+      translationEl,
       segments,
       wordCount: segments.filter((segment) => segment.wordIndex !== null).length,
       alignments: new Map(),
       textIndex: null,
-    })
+    }
+    this.entries.set(host, entry)
+    this.entryByTranslationEl.set(translationEl, entry)
   }
 
   unregister(host: Element): void {
+    const entry = this.entries.get(host)
+    if (entry) this.entryByTranslationEl.delete(entry.translationEl)
     this.entries.delete(host)
     if (this.overlayHost === host || this.highlightedHost === host) this.clearInteraction()
   }
@@ -342,6 +341,8 @@ export class PageAlignmentController {
    * pseudo-element computed style, so coalesce events into one rAF per frame.
    */
   private readonly onPointerMove = (event: PointerEvent): void => {
+    // composedPath() empties once dispatch finishes; event.target stays valid
+    // into the rAF callback.
     this.pendingPointer = event
     if (this.pointerFrame) return
     this.pointerFrame = window.requestAnimationFrame(() => {
@@ -353,47 +354,37 @@ export class PageAlignmentController {
   }
 
   private handlePointerMove(event: PointerEvent): void {
-    const origin = event.composedPath().find((item): item is Element => item instanceof Element)
-    const host = origin?.closest(TRANSLATED_SELECTOR) ?? null
-    const entry = host ? this.entries.get(host) : undefined
-    if (!host || !entry || entry.isUi || !host.isConnected) {
+    const origin = event.target instanceof Element ? event.target : null
+    const inserted =
+      (origin?.closest('[data-lens-page-inserted]') as HTMLElement | null) ?? null
+    const entry = inserted ? this.entryByTranslationEl.get(inserted) : undefined
+    if (!inserted || !entry || !entry.host.isConnected || !inserted.isConnected) {
       this.clearInteraction()
       return
     }
+    const host = entry.host
 
-    // Overlay-rendered hosts (virtualized feeds) paint translations via a
-    // floating div instead of ::after, so getComputedStyle(host, '::after')
-    // returns empty values. Word-level alignment is not supported there —
-    // degrade gracefully instead of rendering an invisible zero-size overlay.
-    if (host.hasAttribute('data-lens-page-render')) {
-      this.clearInteraction()
-      return
-    }
-
-    // Layout reads are cached per host — moving within one translated block no
-    // longer forces Range/computed-style work on every frame. A cheap rect-top
-    // check detects the host drifting (streamed translations above pushing it).
-    const rectTop = host.getBoundingClientRect().top
+    // Layout reads are cached per translation element — moving within one
+    // translation no longer forces computed-style work on every frame. A cheap
+    // rect-top check detects drift (streamed translations above pushing it).
+    const rectTop = inserted.getBoundingClientRect().top
     if (
-      host !== this.measuredHost ||
-      !this.measuredPseudoStyle ||
-      rectTop !== this.measuredHostTop
+      inserted !== this.measuredTranslationEl ||
+      !this.measuredTranslationStyle ||
+      rectTop !== this.measuredTranslationTop
     ) {
-      const pseudoStyle = window.getComputedStyle(host, '::after')
-      this.measuredHost = host
-      this.measuredPseudoStyle = pseudoStyle
-      this.measuredHostTop = rectTop
-      this.measuredTranslationTop =
-        this.sourceContentBottom(host) + numericStyle(pseudoStyle.marginTop)
+      this.measuredTranslationEl = inserted
+      this.measuredTranslationStyle = window.getComputedStyle(inserted)
+      this.measuredTranslationTop = rectTop
     }
     const translationTop = this.measuredTranslationTop
-    const pseudoStyle = this.measuredPseudoStyle
-    if (event.clientY < translationTop) {
+    const translationStyle = this.measuredTranslationStyle
+    if (!translationStyle || event.clientY < translationTop) {
       this.clearInteraction()
       return
     }
 
-    this.ensureOverlay(entry, translationTop, pseudoStyle)
+    this.ensureOverlay(entry, translationTop, translationStyle)
     const overlayRect = this.overlay?.getBoundingClientRect()
     if (
       !overlayRect ||
@@ -512,7 +503,7 @@ export class PageAlignmentController {
   private ensureOverlay(
     entry: AlignmentEntry,
     top: number,
-    pseudoStyle: CSSStyleDeclaration,
+    translationStyle: CSSStyleDeclaration,
   ): void {
     if (!this.overlay) {
       this.overlay = document.createElement('div')
@@ -536,17 +527,10 @@ export class PageAlignmentController {
       this.overlayHost = entry.host
     }
 
-    const hostRect = entry.host.getBoundingClientRect()
-    const hostStyle = window.getComputedStyle(entry.host)
-    const left = hostRect.left + numericStyle(hostStyle.borderLeftWidth) + numericStyle(hostStyle.paddingLeft)
-    const width = Math.max(
-      1,
-      hostRect.width -
-        numericStyle(hostStyle.borderLeftWidth) -
-        numericStyle(hostStyle.borderRightWidth) -
-        numericStyle(hostStyle.paddingLeft) -
-        numericStyle(hostStyle.paddingRight),
-    )
+    // Overlay sits on the inserted translation element, not the source host.
+    const translationRect = entry.translationEl.getBoundingClientRect()
+    const left = translationRect.left
+    const width = Math.max(1, translationRect.width)
     const style = this.overlay.style
     style.all = 'initial'
     style.position = 'fixed'
@@ -557,29 +541,21 @@ export class PageAlignmentController {
     style.top = `${top}px`
     style.width = `${width}px`
     style.margin = '0'
-    style.padding = pseudoStyle.padding
+    style.padding = translationStyle.padding
     style.border = '0'
     style.background = 'transparent'
     style.color = 'transparent'
-    style.fontFamily = pseudoStyle.fontFamily
-    style.fontSize = pseudoStyle.fontSize
-    style.fontStyle = pseudoStyle.fontStyle
-    style.fontWeight = pseudoStyle.fontWeight
-    style.lineHeight = pseudoStyle.lineHeight
-    style.letterSpacing = pseudoStyle.letterSpacing
-    style.wordSpacing = pseudoStyle.wordSpacing
-    style.textAlign = pseudoStyle.textAlign
-    style.whiteSpace = pseudoStyle.whiteSpace
-    style.overflowWrap = pseudoStyle.overflowWrap
-    style.direction = pseudoStyle.direction
-  }
-
-  private sourceContentBottom(host: Element): number {
-    const range = document.createRange()
-    range.selectNodeContents(host)
-    const rects = [...range.getClientRects()]
-    range.detach()
-    return rects.reduce((bottom, rect) => Math.max(bottom, rect.bottom), host.getBoundingClientRect().top)
+    style.fontFamily = translationStyle.fontFamily
+    style.fontSize = translationStyle.fontSize
+    style.fontStyle = translationStyle.fontStyle
+    style.fontWeight = translationStyle.fontWeight
+    style.lineHeight = translationStyle.lineHeight
+    style.letterSpacing = translationStyle.letterSpacing
+    style.wordSpacing = translationStyle.wordSpacing
+    style.textAlign = translationStyle.textAlign
+    style.whiteSpace = translationStyle.whiteSpace
+    style.overflowWrap = translationStyle.overflowWrap
+    style.direction = translationStyle.direction
   }
 
   private segmentAtPoint(x: number, y: number, entry: AlignmentEntry): DisplaySegment | undefined {
@@ -678,8 +654,8 @@ export class PageAlignmentController {
     this.hoveredText = ''
     this.starBtn?.remove()
     this.starContext = null
-    this.measuredHost = null
-    this.measuredPseudoStyle = null
+    this.measuredTranslationEl = null
+    this.measuredTranslationStyle = null
     this.measuredTranslationTop = 0
     this.overlay?.remove()
     this.overlay = null

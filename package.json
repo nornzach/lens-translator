@@ -1,6 +1,6 @@
 {
   "name": "lens-translator",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "On-demand translation lens, selection popup, and bilingual page mode for Chrome.",
   "private": true,
   "type": "module",
@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:browser": "node tests/browser/run-rendering.mjs"
   },
   "keywords": [
     "chrome-extension",

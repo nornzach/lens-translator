@@ -59,6 +59,7 @@ export type UserSettings = {
   onboardingCompleted: boolean
   pageTranslationFontFamily: TranslationFontFamily
   pageTranslationFontSizePx: number
+  pageTranslationUseOriginalFontSize: boolean
   pageTranslationUseCustomColor: boolean
   pageTranslationTextColor: string
   pageTranslationUseBackground: boolean
@@ -99,6 +100,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   onboardingCompleted: false,
   pageTranslationFontFamily: 'system',
   pageTranslationFontSizePx: 14,
+  pageTranslationUseOriginalFontSize: true,
   pageTranslationUseCustomColor: false,
   pageTranslationTextColor: '#0e7490',
   pageTranslationUseBackground: false,
@@ -107,7 +109,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   pageTranslationItalic: false,
   pageTranslationUnderline: false,
   lensWidthPx: 320,
-  minTextLength: 10,
+  minTextLength: 3,
   batchCharLimit: 6000,
   prefetchMarginRatio: 0.5,
   hotkey: {
@@ -262,6 +264,13 @@ export function mergeSettings(partial: unknown): UserSettings {
           ? true
           : DEFAULT_SETTINGS.onboardingCompleted,
     pageTranslationFontFamily: asTranslationFontFamily(p.pageTranslationFontFamily),
+    // Preserve a previous non-default size on upgrade; otherwise follow the page.
+    pageTranslationUseOriginalFontSize:
+      typeof p.pageTranslationUseOriginalFontSize === 'boolean'
+        ? p.pageTranslationUseOriginalFontSize
+        : typeof p.pageTranslationFontSizePx !== 'number' ||
+          !Number.isFinite(p.pageTranslationFontSizePx) ||
+          p.pageTranslationFontSizePx === DEFAULT_SETTINGS.pageTranslationFontSizePx,
     pageTranslationFontSizePx: finiteNumber(
       p.pageTranslationFontSizePx,
       DEFAULT_SETTINGS.pageTranslationFontSizePx,

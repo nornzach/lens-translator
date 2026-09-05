@@ -148,6 +148,7 @@ function pageStyleSigOf(s: UserSettings): string {
     s.pageTranslationDisplayMode,
     s.pageTranslationFontFamily,
     s.pageTranslationFontSizePx,
+    s.pageTranslationUseOriginalFontSize,
     s.pageTranslationUseCustomColor,
     s.pageTranslationTextColor,
     s.pageTranslationUseBackground,

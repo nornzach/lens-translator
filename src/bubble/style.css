@@ -436,6 +436,15 @@ input[type="range"] {
   margin-top: 10px;
 }
 
+.font-size-choice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--lt-text-2);
+  font-size: 11px;
+}
+
 .format-button,
 .color-tool {
   width: 32px;

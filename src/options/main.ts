@@ -185,6 +185,7 @@ function fillForm(s: UserSettings): void {
   el<HTMLInputElement>('pageTranslationFontSizePx').value = String(
     s.pageTranslationFontSizePx,
   )
+  el<HTMLInputElement>('pageTranslationUseOriginalFontSize').checked = s.pageTranslationUseOriginalFontSize
   el<HTMLInputElement>('pageTranslationUseCustomColor').checked =
     s.pageTranslationUseCustomColor
   el<HTMLInputElement>('pageTranslationTextColor').value = s.pageTranslationTextColor
@@ -236,6 +237,7 @@ function readForm(stored: UserSettings): UserSettings {
     pageTranslationFontSizePx: Number(
       el<HTMLInputElement>('pageTranslationFontSizePx').value,
     ),
+    pageTranslationUseOriginalFontSize: el<HTMLInputElement>('pageTranslationUseOriginalFontSize').checked,
     pageTranslationUseCustomColor: el<HTMLInputElement>('pageTranslationUseCustomColor').checked,
     pageTranslationTextColor: el<HTMLInputElement>('pageTranslationTextColor').value,
     pageTranslationUseBackground: el<HTMLInputElement>('pageTranslationUseBackground').checked,

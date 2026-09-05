@@ -162,6 +162,24 @@ describe('phrasing + hints', () => {
     expect(isLeafTextContainer(tab, 10)).toBe(true)
   })
 
+  it('treats semantic text nested inside a button as compact UI', () => {
+    const button = fakeEl({ tag: 'button', text: 'Continue' })
+    const label = fakeEl({ tag: 'p', text: 'Continue', parent: button })
+    label.closest = ((selector: string) =>
+      selector.includes('button') ? button : null) as typeof label.closest
+
+    expect(isUiLabelElement(label)).toBe(true)
+  })
+
+  it('does not treat a model link inside a table cell as standalone UI', () => {
+    const cell = fakeEl({ tag: 'td' })
+    const link = fakeEl({ tag: 'a', text: 'claude-opus-5-max', parent: cell })
+    link.closest = ((selector: string) =>
+      selector.includes('td') ? cell : null) as typeof link.closest
+
+    expect(isUiLabelElement(link)).toBe(false)
+  })
+
   it('does not merge a wrapper containing multiple links into one text block', () => {
     const first = fakeEl({ tag: 'a', text: 'Quickstart' })
     const second = fakeEl({ tag: 'a', text: 'Features overview' })
@@ -304,33 +322,13 @@ describe('phrasing + hints', () => {
     expect(extractPageBlocks(10)).toMatchObject([{ el: paragraph }])
   })
 
-  it('extracts plain navigation links as separate rows', () => {
-    vi.stubGlobal('window', {
-      innerHeight: 800,
-      innerWidth: 1200,
-      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
-    })
-    const first = fakeEl({ tag: 'a', text: 'Quickstart' })
-    const second = fakeEl({ tag: 'a', text: 'Features overview' })
-    vi.stubGlobal('document', {
-      querySelectorAll: (selector: string) =>
-        selector === 'a, [role="link"]' ? [first, second] : [],
-      createTreeWalker: () => ({ nextNode: () => null }),
-    })
-
-    expect(extractPageBlocks(2).map((block) => block.text)).toEqual([
-      'Quickstart',
-      'Features overview',
-    ])
-  })
-
   it('falls back to deeply nested text nodes with no semantic selectors', () => {
     vi.stubGlobal('window', {
       innerHeight: 800,
       innerWidth: 1200,
       getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
     })
-    const host = fakeEl({ tag: 'div' })
+    const host = fakeEl({ tag: 'div', text: 'Deep framework wrappers should still expose this sentence for translation.' })
     const span = fakeEl({ tag: 'span' })
     const strong = fakeEl({ tag: 'strong' })
     Object.defineProperty(span, 'parentElement', { get: () => host })
@@ -359,6 +357,258 @@ describe('phrasing + hints', () => {
     ])
   })
 
+  it('extracts malformed bare list text as a reading block', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    })
+    const host = fakeEl({ tag: 'ul', text: '6.5.1. Advisory Council Chairs will serve 3-year terms.' })
+    const textNode = {
+      data: '6.5.1. Advisory Council Chairs will serve 3-year terms.',
+      parentElement: host,
+    } as unknown as Text
+    let returned = false
+    vi.stubGlobal('document', {
+      querySelectorAll: () => [],
+      createTreeWalker: () => ({
+        nextNode: () => {
+          if (returned) return null
+          returned = true
+          return textNode
+        },
+      }),
+    })
+
+    expect(extractPageBlocks(3)).toMatchObject([
+      {
+        el: host,
+        text: '6.5.1. Advisory Council Chairs will serve 3-year terms.',
+      },
+    ])
+  })
+
+  it('keeps a content list item with multiple inline links as one block', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    })
+    const first = fakeEl({ tag: 'a', text: 'NetSuite' })
+    const second = fakeEl({ tag: 'a', text: 'Learning Cloud Support' })
+    const item = fakeEl({
+      tag: 'li',
+      text: 'Access to NetSuite, SuiteAnswers, Help Center, and Learning Cloud Support.',
+      children: [first, second],
+    })
+    item.querySelectorAll = ((selector: string) =>
+      selector.startsWith('a, button') ? [first, second] : []) as unknown as typeof item.querySelectorAll
+    vi.stubGlobal('document', {
+      querySelectorAll: (selector: string) => (selector.startsWith('p,h1') ? [item] : []),
+      createTreeWalker: () => ({ nextNode: () => null }),
+    })
+
+    expect(extractPageBlocks(3)).toMatchObject([
+      {
+        el: item,
+        text: 'Access to NetSuite, SuiteAnswers, Help Center, and Learning Cloud Support.',
+      },
+    ])
+  })
+
+  it('uses rendered spacing for table cell text', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'table-cell', visibility: 'visible', opacity: '1' }),
+    })
+    const cell = Object.assign(
+      fakeEl({
+        tag: 'td',
+        text: 'claude-opus-5-maxAnthropic · Proprietary',
+      }),
+      { innerText: 'claude-opus-5-max\nAnthropic · Proprietary' },
+    )
+    vi.stubGlobal('document', {
+      querySelectorAll: (selector: string) => (selector.startsWith('p,h1') ? [cell] : []),
+      createTreeWalker: () => ({ nextNode: () => null }),
+    })
+
+    expect(extractPageBlocks(3).map((block) => block.text)).toEqual([
+      'claude-opus-5-max Anthropic · Proprietary',
+    ])
+  })
+
+  it('splits hard-break footnotes into independent page blocks', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    })
+    const sup1 = Object.assign(fakeEl({ tag: 'sup', text: '1' }), {
+      nodeType: 1,
+      isConnected: true,
+    })
+    const break1 = Object.assign(fakeEl({ tag: 'br' }), { nodeType: 1, isConnected: true })
+    const break2 = Object.assign(fakeEl({ tag: 'br' }), { nodeType: 1, isConnected: true })
+    const sup2 = Object.assign(fakeEl({ tag: 'sup', text: '2' }), {
+      nodeType: 1,
+      isConnected: true,
+    })
+    const break3 = Object.assign(fakeEl({ tag: 'br' }), { nodeType: 1, isConnected: true })
+    const break4 = Object.assign(fakeEl({ tag: 'br' }), { nodeType: 1, isConnected: true })
+    const strong = fakeEl({
+      tag: 'strong',
+      children: [sup1, break1, break2, sup2, break3, break4],
+    })
+    const firstText = {
+      nodeType: 3,
+      textContent: 'First institutional membership footnote.',
+      parentElement: strong,
+    }
+    const secondText = {
+      nodeType: 3,
+      textContent: 'Second cloud program membership footnote.',
+      parentElement: strong,
+    }
+    const nodes = [sup1, firstText, break1, break2, sup2, secondText, break3, break4]
+    for (let index = 0; index < nodes.length; index++) {
+      Object.assign(nodes[index], {
+        parentNode: strong,
+        parentElement: strong,
+        nextSibling: nodes[index + 1] ?? null,
+      })
+    }
+    Object.assign(strong, { childNodes: nodes })
+    const paragraph = fakeEl({
+      tag: 'p',
+      text: '1 First institutional membership footnote. 2 Second cloud program membership footnote.',
+      children: [strong],
+    })
+    Object.assign(strong, { parentElement: paragraph, parentNode: paragraph })
+    paragraph.querySelector = ((selector: string) =>
+      selector === 'br + br' ? break2 : null) as typeof paragraph.querySelector
+    vi.stubGlobal('document', {
+      querySelectorAll: (selector: string) => (selector.startsWith('p,h1') ? [paragraph] : []),
+      createTreeWalker: () => ({ nextNode: () => null }),
+    })
+
+    expect(extractPageBlocks(3).map(({ text, segmentNodes }) => ({ text, segmentNodes }))).toEqual([
+      {
+        text: '1First institutional membership footnote.',
+        segmentNodes: [sup1, firstText],
+      },
+      {
+        text: '2Second cloud program membership footnote.',
+        segmentNodes: [sup2, secondText],
+      },
+    ])
+  })
+
+  it('extracts short controls inside page chrome regardless of prose minimum', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    })
+    const header = fakeEl({ tag: 'header' })
+    const iconWrapper = fakeEl({ tag: 'div' })
+    const control = fakeEl({
+      tag: 'a',
+      text: 'Home',
+      children: [iconWrapper],
+      parent: header,
+    })
+    control.closest = ((selector: string) =>
+      selector.includes('header') ? header : null) as typeof control.closest
+    vi.stubGlobal('document', {
+      querySelectorAll: (selector: string) =>
+        selector.includes('[role="menuitemcheckbox"]') ? [control] : [],
+      createTreeWalker: () => ({ nextNode: () => null }),
+    })
+
+    expect(extractPageBlocks(10).map((block) => block.text)).toEqual(['Home'])
+  })
+
+  it('extracts Reddit comment prose and actions but skips author metadata', () => {
+    vi.stubGlobal('window', {
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    })
+    const paragraph = fakeEl({
+      tag: 'p',
+      text: 'Same thoughts. I am doubting the bang for the buck.',
+    })
+    const content = fakeEl({
+      tag: 'div',
+      attrs: { slot: 'comment' },
+      children: [paragraph],
+    })
+    const metadata = fakeEl({ tag: 'div', text: 'TBHProbablyNot · 1d ago' })
+    const reply = fakeEl({ tag: 'button', text: 'Reply' })
+    const share = fakeEl({ tag: 'button', text: 'Share' })
+    const actions = fakeEl({
+      tag: 'shreddit-comment-action-row',
+      text: 'Reply Share',
+      attrs: { slot: 'comment-action-row' },
+      children: [reply, share],
+    })
+    const comment = fakeEl({
+      tag: 'shreddit-comment',
+      children: [metadata, content, actions],
+    })
+    Object.assign(paragraph, { parentElement: content, parentNode: content })
+    for (const child of [metadata, content, actions]) {
+      Object.assign(child, { parentElement: comment, parentNode: comment })
+    }
+    for (const control of [reply, share]) {
+      Object.assign(control, { parentElement: actions, parentNode: actions })
+    }
+    const commentShadowQuery = vi.fn(() => [] as Element[])
+    Object.assign(comment, { shadowRoot: { querySelectorAll: commentShadowQuery } })
+    for (const el of [comment, metadata, content, paragraph, actions, reply, share]) {
+      el.closest = ((selector: string) => {
+        if (selector === 'shreddit-comment') return comment
+        if (selector === '[slot="comment"]') {
+          return el === content || el === paragraph ? content : null
+        }
+        if (
+          selector ===
+          'shreddit-comment-action-row, [slot="comment-action-row"], [slot="actionRow"]'
+        ) {
+          return el === actions || el === reply || el === share ? actions : null
+        }
+        return null
+      }) as typeof el.closest
+    }
+    const textNodes = [
+      { data: paragraph.textContent, parentElement: paragraph },
+      { data: metadata.textContent, parentElement: metadata },
+      { data: reply.textContent, parentElement: reply },
+      { data: share.textContent, parentElement: share },
+    ]
+    vi.stubGlobal('document', {
+      querySelectorAll: (selector: string) => {
+        if (selector === '*') return [comment]
+        if (selector.startsWith('p,h1')) return [paragraph]
+        if (selector.includes('[role="menuitemcheckbox"]')) return [reply, share]
+        return []
+      },
+      createTreeWalker: () => {
+        let index = 0
+        return { nextNode: () => textNodes[index++] ?? null }
+      },
+    })
+
+    expect(extractPageBlocks(3).map((block) => block.text)).toEqual([
+      'Same thoughts. I am doubting the bang for the buck.',
+      'Reply',
+      'Share',
+    ])
+    expect(commentShadowQuery).not.toHaveBeenCalled()
+  })
+
 describe('elementText excludes embedded non-content subtrees', () => {
   it('drops <script type="application/json"> text next to visible UI', () => {
     const container = { tagName: 'DIV', parentElement: null } as unknown as Element
@@ -369,6 +619,9 @@ describe('elementText excludes embedded non-content subtrees', () => {
       nodeValue: '{"props":{"SubscriptionType":"None","RepositoryId":1053118194}}',
       parentElement: script,
     }
+    const svg = { tagName: 'SVG', parentElement: container } as unknown as Element
+    const title = { tagName: 'TITLE', parentElement: svg } as unknown as Element
+    const iconTitle = { nodeValue: 'Decorative provider name', parentElement: title }
     ;(container as unknown as { querySelector: () => Element }).querySelector = () => script
 
     vi.stubGlobal('document', {
@@ -377,7 +630,7 @@ describe('elementText excludes embedded non-content subtrees', () => {
         _show: number,
         filter: { acceptNode: (node: Node) => number },
       ) => {
-        const yielded = [visibleText, jsonText].filter(
+        const yielded = [visibleText, jsonText, iconTitle].filter(
           (n) => filter.acceptNode(n as unknown as Node) === 1,
         )
         let i = 0
@@ -386,6 +639,45 @@ describe('elementText excludes embedded non-content subtrees', () => {
     })
 
     expect(elementText(container)).toBe('Watch 13')
+  })
+
+  it('drops translator-owned text from a translated parent', () => {
+    const container = {
+      tagName: 'LI',
+      parentElement: null,
+      hasAttribute: () => false,
+    } as unknown as Element
+    const source = {
+      tagName: 'A',
+      parentElement: container,
+      hasAttribute: () => false,
+    } as unknown as Element
+    const inserted = {
+      tagName: 'DIV',
+      parentElement: container,
+      hasAttribute: (name: string) => name === 'data-lens-ignore',
+    } as unknown as Element
+    const sourceText = { nodeValue: 'Home', parentElement: source }
+    const translatedText = { nodeValue: '首页', parentElement: inserted }
+    // Minimal DOM stub: querySelector advertises the ignored child.
+    const containerWithQuery = container as unknown as { querySelector: () => Element }
+    containerWithQuery.querySelector = () => inserted
+
+    vi.stubGlobal('document', {
+      createTreeWalker: (
+        _root: Node,
+        _show: number,
+        filter: { acceptNode: (node: Node) => number },
+      ) => {
+        const yielded = [sourceText, translatedText].filter(
+          (node) => filter.acceptNode(node as unknown as Node) === 1,
+        )
+        let index = 0
+        return { nextNode: () => (yielded[index++] ?? null) as unknown as Node }
+      },
+    })
+
+    expect(elementText(container)).toBe('Home')
   })
 
   it('returns textContent directly when there is no embedded script/style', () => {
@@ -399,7 +691,7 @@ describe('elementText excludes embedded non-content subtrees', () => {
 })
 
 describe('dedupeNestedBlocks', () => {
-  it('drops parent when child covers most text', () => {
+  it('drops parent when child covers all its text', () => {
     const childEl = fakeEl({
       tag: 'p',
       text: 'Child paragraph with enough length for reading unit.',
@@ -431,6 +723,70 @@ describe('dedupeNestedBlocks', () => {
     const out = dedupeNestedBlocks(blocks)
     expect(out.some((b) => b.id === 'c1')).toBe(true)
     expect(out.some((b) => b.id === 'p1')).toBe(false)
+    const intro = dedupeNestedBlocks([{ ...blocks[0], text: `Note: ${blocks[0].text}` }, blocks[1]])
+    expect(intro.map(block => block.id)).toEqual(['p1'])
+  })
+
+  it('drops a shell covered by several nested leaves (union coverage)', () => {
+    // Feed-item shell (e.g. <article>) made of div/span lines: no single line
+    // dominates and there are no p/li/h descendants, but the lines together
+    // cover the shell text — the shell must not be translated a second time.
+    const lineA = fakeEl({ tag: 'div', text: 'First line of the post body.' })
+    const lineB = fakeEl({ tag: 'div', text: 'Second line follows right here.' })
+    const lineC = fakeEl({ tag: 'span', text: 'Third line closes the post.' })
+    const shell = fakeEl({
+      tag: 'article',
+      text:
+        'First line of the post body. Second line follows right here. Third line closes the post.',
+      children: [lineA, lineB, lineC],
+    })
+    for (const line of [lineA, lineB, lineC]) {
+      Object.defineProperty(line, 'parentElement', { get: () => shell })
+      line.contains = () => false
+    }
+    shell.contains = (o: Node) => [lineA, lineB, lineC].includes(o as unknown as Element)
+
+    const blocks: ExtractedBlock[] = [
+      {
+        id: 'shell',
+        el: shell,
+        tag: 'article',
+        text: 'First line of the post body. Second line follows right here. Third line closes the post.',
+      },
+      { id: 'a', el: lineA, tag: 'div', text: 'First line of the post body.' },
+      { id: 'b', el: lineB, tag: 'div', text: 'Second line follows right here.' },
+      { id: 'c', el: lineC, tag: 'span', text: 'Third line closes the post.' },
+    ]
+    const out = dedupeNestedBlocks(blocks)
+    expect(out.map((b) => b.id).sort()).toEqual(['a', 'b', 'c'])
+  })
+
+  it('keeps a container with its own text as the sole owner of its nested text', () => {
+    // The wrapper carries a long intro the leaves do not cover — dropping it
+    // would lose that text, so its nested leaf must yield ownership instead.
+    const leaf = fakeEl({ tag: 'div', text: 'Quoted reply text.' })
+    const wrapper = fakeEl({
+      tag: 'div',
+      text:
+        'A long introduction paragraph that stands on its own and is not part of any nested leaf block at all. Quoted reply text.',
+      children: [leaf],
+    })
+    Object.defineProperty(leaf, 'parentElement', { get: () => wrapper })
+    leaf.contains = () => false
+    wrapper.contains = (o: Node) => o === (leaf as unknown as Node)
+
+    const blocks: ExtractedBlock[] = [
+      {
+        id: 'wrap',
+        el: wrapper,
+        tag: 'div',
+        text: 'A long introduction paragraph that stands on its own and is not part of any nested leaf block at all. Quoted reply text.',
+      },
+      { id: 'leaf', el: leaf, tag: 'div', text: 'Quoted reply text.' },
+    ]
+    const out = dedupeNestedBlocks(blocks)
+    expect(out.some((b) => b.id === 'wrap')).toBe(true)
+    expect(out.some((b) => b.id === 'leaf')).toBe(false)
   })
 })
 

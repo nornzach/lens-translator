@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  downstreamOverlap,
+  evaluatePlacement,
   groupPageBlocks,
-  isPageTranslationCandidate,
-  isPageUiTranslationCandidate,
-  pageTranslationHost,
+  pageStyles,
+  PageTranslator,
 } from '../../src/content/page-translator'
 import type { ExtractedBlock } from '../../src/content/extract'
 
@@ -28,34 +29,6 @@ function block(id: string, text: string, top: number, order: number): ExtractedB
   return { id, text, tag: 'p', el }
 }
 
-function candidateElement(
-  text: string,
-  tagName = 'span',
-  ancestors: Array<{ tagName: string; role?: string; text?: string }> = [],
-): Element {
-  const self: { tagName: string; role?: string; text?: string } = { tagName, text }
-  const chain = [self, ...ancestors]
-  return {
-    tagName: tagName.toUpperCase(),
-    textContent: text,
-    children: [],
-    querySelectorAll: () => [],
-    getAttribute: (name: string) => (name === 'role' ? null : null),
-    closest: (selector: string) => {
-      for (const item of chain) {
-        const matches = selector.split(',').some((part) => {
-          const value = part.trim()
-          if (value === item.tagName) return true
-          const role = value.match(/^\[role="(.+)"\]$/)?.[1]
-          return role !== undefined && role === item.role
-        })
-        if (matches) return { textContent: item.text ?? text }
-      }
-      return null
-    },
-  } as unknown as Element
-}
-
 afterEach(() => vi.unstubAllGlobals())
 
 describe('groupPageBlocks', () => {
@@ -76,75 +49,275 @@ describe('groupPageBlocks', () => {
   })
 })
 
-describe('isPageTranslationCandidate', () => {
-  it('keeps navigation and controls as compact UI translations', () => {
-    const candidates = [
-      { id: 'nav', text: 'Explore topics', tagName: 'span', ancestors: [{ tagName: 'nav' }] },
-      { id: 'button', text: 'Show more results', tagName: 'span', ancestors: [{ tagName: 'button' }] },
-      { id: 'link', text: 'Features overview', tagName: 'a', ancestors: [] },
-    ]
-
-    for (const { id, text, tagName, ancestors } of candidates) {
-      const candidate = {
-        id,
-        el: candidateElement(text, tagName, ancestors),
-        tag: tagName,
-        text,
-      }
-      expect(isPageTranslationCandidate(candidate, 10)).toBe(true)
-      expect(isPageUiTranslationCandidate(candidate)).toBe(true)
+describe('PageTranslator source-owned rendering', () => {
+  function subject() {
+    const value = Object.create(PageTranslator.prototype) as {
+      insertedNodeByHost: Map<Element, HTMLElement>
+      hostByInsertedNode: WeakMap<HTMLElement, Element>
+      shadowStyles: WeakMap<ShadowRoot, HTMLStyleElement>
+      currentSettings: null
+      insertTranslationIntoHost(host: Element, translation: string): HTMLElement
     }
+    value.insertedNodeByHost = new Map()
+    value.hostByInsertedNode = new WeakMap()
+    value.shadowStyles = new WeakMap()
+    value.currentSettings = null
+    return value
+  }
+
+  it.each(['P', 'LI', 'TD', 'TH'])('keeps a %s translation inside its exact host', (tag) => {
+    const inserted = {
+      setAttribute: vi.fn(),
+      textContent: '',
+    } as unknown as HTMLElement
+    const append = vi.fn()
+    const host = {
+      tagName: tag,
+      getAttribute: () => null,
+      closest: () => null,
+      hasAttribute: () => false,
+      append,
+      getRootNode: () => document,
+    } as unknown as Element
+    const createElement = vi.fn(() => inserted)
+    vi.stubGlobal('ShadowRoot', class {})
+    vi.stubGlobal('document', { createElement })
+
+    expect(subject().insertTranslationIntoHost(host, '译文')).toBe(inserted)
+    expect(createElement).toHaveBeenCalledWith('span')
+    expect(append).toHaveBeenCalledWith(inserted)
   })
 
-  it('rejects metadata links and time labels', () => {
-    const candidates = [
-      { id: 'handle', text: '@example_user', ancestors: [{ tagName: 'a' }] },
-      { id: 'account', text: 'Example @example_user', ancestors: [{ tagName: 'a' }] },
-      { id: 'time', text: 'Yesterday morning', ancestors: [{ tagName: 'time' }] },
-    ]
+  it('never escapes a web-component slot', () => {
+    const inserted = {
+      setAttribute: vi.fn(),
+      textContent: '',
+    } as unknown as HTMLElement
+    const slot = {
+      hasAttribute: (name: string) => name === 'slot',
+    } as unknown as Element
+    const append = vi.fn()
+    const host = {
+      tagName: 'P',
+      parentElement: slot,
+      getAttribute: () => null,
+      closest: () => null,
+      hasAttribute: () => false,
+      append,
+      getRootNode: () => document,
+    } as unknown as Element
+    vi.stubGlobal('ShadowRoot', class {})
+    vi.stubGlobal('document', { createElement: () => inserted })
 
-    for (const { id, text, ancestors } of candidates) {
-      const candidate = {
-        id,
-        el: candidateElement(text, 'span', ancestors),
-        tag: 'span',
-        text,
-      }
-      expect(isPageTranslationCandidate(candidate, 2)).toBe(false)
-    }
+    subject().insertTranslationIntoHost(host, '译文')
+
+    expect(append).toHaveBeenCalledWith(inserted)
+    expect(inserted.setAttribute).not.toHaveBeenCalledWith('slot', expect.anything())
   })
 
-  it('skips grid/chart widgets and bare date-axis labels that break layout', () => {
-    const gridLabels = [
-      { id: 'month', text: 'Jul', ancestors: [{ tagName: 'td' }, { tagName: 'table', role: 'grid' }] },
-      { id: 'weekday', text: 'Mon', ancestors: [{ tagName: 'td' }, { tagName: 'table', role: 'grid' }] },
-    ]
-    for (const { id, text, ancestors } of gridLabels) {
-      const candidate = { id, el: candidateElement(text, 'span', ancestors), tag: 'span', text }
-      expect(isPageTranslationCandidate(candidate, 2)).toBe(false)
-    }
+  it('marks a compact control without freezing inherited styles inline', () => {
+    const attributes = new Set<string>()
+    const setProperty = vi.fn()
+    const inserted = {
+      setAttribute: vi.fn((name: string) => attributes.add(name)),
+      hasAttribute: (name: string) => attributes.has(name),
+      style: { setProperty },
+      textContent: '',
+    } as unknown as HTMLElement
+    const label = {
+      closest: () => null,
+    } as unknown as HTMLElement
+    const textNode = {
+      textContent: 'Share',
+      parentElement: label,
+    } as unknown as Node
+    const nextNode = vi.fn().mockReturnValueOnce(textNode).mockReturnValue(null)
+    const append = vi.fn()
+    const host = {
+      tagName: 'BUTTON',
+      getAttribute: () => null,
+      closest: () => null,
+      hasAttribute: () => false,
+      append,
+      getRootNode: () => document,
+      ownerDocument: { createTreeWalker: () => ({ nextNode }) },
+    } as unknown as Element
+    const createElement = vi.fn(() => inserted)
+    vi.stubGlobal('ShadowRoot', class {})
+    vi.stubGlobal('window', {
+      getComputedStyle: (el: Element) => ({
+        color: el === label ? 'rgb(15, 20, 25)' : 'rgb(85, 26, 139)',
+      }),
+    })
+    vi.stubGlobal('document', { createElement })
 
-    // Even outside a grid, a standalone month/weekday token adds no value and risks layout.
-    for (const text of ['August', 'Sunday', 'Sep', 'May']) {
-      const candidate = { id: text, el: candidateElement(text, 'span'), tag: 'span', text }
-      expect(isPageTranslationCandidate(candidate, 2)).toBe(false)
+    subject().insertTranslationIntoHost(host, '分享')
+
+    expect(createElement).toHaveBeenCalledWith('span')
+    expect(inserted.setAttribute).toHaveBeenCalledWith('data-lens-page-control', '')
+    expect(setProperty).not.toHaveBeenCalled()
+    expect(append).toHaveBeenCalledWith(inserted)
+  })
+})
+
+describe('PageTranslator mutation scan scheduling', () => {
+  it('cannot be starved by continuous mutations', () => {
+    const callbacks: Array<() => void> = []
+    const setTimeout = vi.fn((callback: () => void) => {
+      callbacks.push(callback)
+      return 1
+    })
+    vi.stubGlobal('window', { setTimeout })
+
+    const scanAndTranslate = vi.fn()
+    const translator = Object.create(PageTranslator.prototype) as {
+      mutationTimer: number
+      active: boolean
+      currentSettings: object | null
+      generation: number
+      scanAndTranslate: typeof scanAndTranslate
+      scheduleScan(delay?: number): void
     }
+    translator.mutationTimer = 0
+    translator.active = true
+    translator.currentSettings = {}
+    translator.generation = 1
+    translator.scanAndTranslate = scanAndTranslate
+
+    translator.scheduleScan()
+    translator.scheduleScan()
+    translator.scheduleScan()
+
+    expect(setTimeout).toHaveBeenCalledTimes(1)
+    callbacks[0]()
+    expect(translator.mutationTimer).toBe(0)
+    expect(scanAndTranslate).toHaveBeenCalledTimes(1)
+  })
+})
+
+
+describe('translation placement measurement', () => {
+  type FakeStyle = {
+    fontSize?: string
+    overflowX?: string
+    overflowY?: string
+    height?: string
+    display?: string
+    flexDirection?: string
+  }
+  type FakeEl = {
+    getBoundingClientRect: () => Record<string, number>
+    parentElement: FakeEl | null
+    __style: FakeStyle
+    nextElementSibling?: FakeEl | null
+    hasAttribute?: (name: string) => boolean
+  }
+  function fakeEl(width: number, height: number, style: FakeStyle = {}, top = 0): FakeEl {
+    return {
+      getBoundingClientRect: () => ({
+        width,
+        height,
+        top,
+        left: 0,
+        bottom: top + height,
+        right: width,
+      }),
+      parentElement: null,
+      __style: style,
+    }
+  }
+  function stubLayout(): void {
+    vi.stubGlobal('window', {
+      getComputedStyle: (el: FakeEl) => ({
+        fontSize: el.__style.fontSize ?? '14px',
+        overflowX: el.__style.overflowX ?? 'visible',
+        overflowY: el.__style.overflowY ?? 'visible',
+        height: el.__style.height ?? 'auto',
+        display: el.__style.display ?? 'block',
+        flexDirection: el.__style.flexDirection ?? 'row',
+      }),
+    })
+    vi.stubGlobal('document', { body: {} })
+  }
+
+  it('flags hosts too narrow for readable text (vertical glyph column)', () => {
+    stubLayout()
+    const host = fakeEl(16, 20)
+    const node = fakeEl(16, 140)
+    node.parentElement = host
+
+    expect(evaluatePlacement(host as unknown as Element, node as unknown as HTMLElement, false)).toBe('narrow')
   })
 
-  it('places UI translation on the inner text label instead of the flex link', () => {
-    const label = candidateElement('Home', 'span')
-    const link = candidateElement('Home', 'a')
-    link.querySelectorAll = (() => [label]) as unknown as typeof link.querySelectorAll
-    const candidate = { id: 'home', el: link, tag: 'a', text: 'Home' }
+  it('flags translations clipped by an overflow-hidden ancestor', () => {
+    stubLayout()
+    const chip = fakeEl(106, 38, { overflowX: 'hidden', overflowY: 'hidden' })
+    const node = fakeEl(100, 60, {}, 30) // bottom 90 exceeds chip bottom 38
+    node.parentElement = chip
 
-    expect(pageTranslationHost(candidate)).toBe(label)
+    expect(evaluatePlacement(chip as unknown as Element, node as unknown as HTMLElement, true)).toBe('clipped')
   })
 
-  it('keeps prose, including prose with an inline link', () => {
-    const text = 'A useful explanation with supporting documentation.'
-    const candidate = { id: 'post', el: candidateElement(text, 'p'), tag: 'p', text }
+  it('flags translations overflowing a fixed-height host row (nav rails)', () => {
+    stubLayout()
+    const rail = fakeEl(240, 40, { height: '40px' })
+    const node = fakeEl(220, 20, {}, 44) // bottom 64 > rail bottom 40
+    node.parentElement = rail
 
-    expect(isPageTranslationCandidate(candidate, 10)).toBe(true)
+    expect(evaluatePlacement(rail as unknown as Element, node as unknown as HTMLElement, true)).toBe('clipped')
+  })
+
+  it('flags a compact translation outside its interactive control', () => {
+    stubLayout()
+    const button = fakeEl(106, 38)
+    const node = fakeEl(217, 20, {}, 0)
+    node.parentElement = button
+
+    expect(evaluatePlacement(button as unknown as Element, node as unknown as HTMLElement, true)).toBe('clipped')
+  })
+
+  it('accepts a healthy wide placement', () => {
+    stubLayout()
+    const host = fakeEl(692, 80)
+    const node = fakeEl(692, 20, {}, 48)
+    node.parentElement = host
+
+    expect(evaluatePlacement(host as unknown as Element, node as unknown as HTMLElement, false)).toBe('ok')
+  })
+
+  it('passes through environments without layout measurement', () => {
+    const host = {} as Element
+    const node = {} as HTMLElement
+    expect(evaluatePlacement(host, node, false)).toBe('ok')
+  })
+
+  it('reports overlap when a node overflows a fixed-height box onto its next sibling', () => {
+    stubLayout()
+    // wrap (64px) contains the node whose bottom reaches 90; the next wrap
+    // starts at 78 — they collide.
+    const node = fakeEl(560, 20, {}, 70) // bottom 90
+    const wrap = fakeEl(640, 64, { height: '64px' })
+    const nextWrap = fakeEl(640, 64, { height: '64px' }, 78)
+    node.parentElement = wrap
+    wrap.parentElement = fakeEl(640, 400)
+    wrap.nextElementSibling = nextWrap
+    wrap.hasAttribute = () => false
+    nextWrap.hasAttribute = () => false
+
+    expect(downstreamOverlap(node as unknown as HTMLElement)).toBe(true)
+  })
+
+  it('reports no overlap while the node stays inside its ancestors', () => {
+    stubLayout()
+    const node = fakeEl(560, 20, {}, 30) // bottom 50 < wrap bottom 64
+    const wrap = fakeEl(640, 64, { height: '64px' })
+    const nextWrap = fakeEl(640, 64, { height: '64px' }, 78)
+    node.parentElement = wrap
+    wrap.parentElement = fakeEl(640, 400)
+    wrap.nextElementSibling = nextWrap
+    wrap.hasAttribute = () => false
+
+    expect(downstreamOverlap(node as unknown as HTMLElement)).toBe(false)
   })
 })
 
@@ -155,6 +328,7 @@ describe('pageStyles display modes', () => {
     pageTranslationEngine: 'browser',
     pageTranslationFontFamily: 'system',
     pageTranslationFontSizePx: 14,
+    pageTranslationUseOriginalFontSize: true,
     pageTranslationUseCustomColor: false,
     pageTranslationTextColor: '#0e7490',
     pageTranslationUseBackground: false,
@@ -166,60 +340,62 @@ describe('pageStyles display modes', () => {
     minTextLength: 10,
   } as const
 
+  it('renders every translation as an inserted element — no ::after path exists', async () => {
+    for (const mode of ['bilingual', 'translation-only', 'learning'] as const) {
+      const css = pageStyles({ ...base, pageTranslationDisplayMode: mode })
+      expect(css).not.toContain('::after')
+      expect(css).toContain('[data-lens-page-inserted]')
+    }
+  })
+
+  it('styles only inserted nodes and never rewrites ancestor geometry', () => {
+    const css = pageStyles({ ...base, pageTranslationDisplayMode: 'bilingual' })
+    expect(css).not.toContain(':has(')
+    expect(css).not.toContain('flex-wrap:')
+    expect(css).toContain('width: 100% !important')
+    expect(css).toContain('grid-column: 1 / -1 !important')
+    expect(css).not.toContain('height: auto !important')
+    expect(css).toContain('display: inline !important')
+  })
+
   it('bilingual mode adds no collapsing or blur rules', async () => {
-    const { pageStyles } = await import('../../src/content/page-translator')
     const css = pageStyles({ ...base, pageTranslationDisplayMode: 'bilingual' })
     expect(css).not.toContain('font-size: 0 !important')
     expect(css).not.toContain('blur')
+    expect(css).not.toContain('visibility: hidden')
   })
 
   it('translation-only hides originals without collapsing layout', async () => {
-    const { pageStyles } = await import('../../src/content/page-translator')
     const css = pageStyles({ ...base, pageTranslationDisplayMode: 'translation-only' })
-    // No font-size collapse: transparent glyphs keep every box's metrics.
-    expect(css).not.toContain('font-size: 0 !important')
-    expect(css).toContain('color: transparent !important')
-    expect(css).toContain('text-shadow: none !important')
-    // Default size: block translations inherit the host's own size (hierarchy survives).
-    expect(css).toContain('font-size: 1em !important')
-    // Translations must not inherit the transparent host color.
-    expect(css).toContain('color: var(--lens-page-body-color, #172033) !important')
+    // Transparent via visibility: boxes keep their metrics, inserted node unaffected.
+    expect(css).toContain('visibility: hidden !important')
+    expect(css).toContain('visibility: visible !important')
+    // Default size: translations inherit the surrounding size (hierarchy survives).
+    expect(css).toContain('font-size: inherit !important')
   })
 
   it('translation-only honors an explicit custom font size', async () => {
-    const { pageStyles } = await import('../../src/content/page-translator')
     const css = pageStyles({
       ...base,
       pageTranslationDisplayMode: 'translation-only',
       pageTranslationFontSizePx: 18,
+      pageTranslationUseOriginalFontSize: false,
     })
-    expect(css).toContain('color: transparent !important')
     expect(css).toContain('font-size: 18px !important')
   })
 
-  it('translation-only uses the custom translation color when configured', async () => {
-    const { pageStyles } = await import('../../src/content/page-translator')
+  it('uses the custom translation color when configured', async () => {
     const css = pageStyles({
       ...base,
-      pageTranslationDisplayMode: 'translation-only',
+      pageTranslationDisplayMode: 'bilingual',
       pageTranslationUseCustomColor: true,
     })
     expect(css).toContain('color: #0e7490 !important')
-    expect(css).not.toContain('var(--lens-page-body-color')
-  })
-
-  it('renders a shimmer placeholder at pending translation positions', async () => {
-    const { pageStyles } = await import('../../src/content/page-translator')
-    const css = pageStyles({ ...base, pageTranslationDisplayMode: 'bilingual' })
-    expect(css).toContain('@keyframes lens-translator-pending-shimmer')
-    expect(css).toContain('[data-lens-page-pending]::after')
-    expect(css).toContain('[data-lens-page-pending][data-lens-page-ui-pending]::after')
   })
 
   it('learning mode blurs translations until hover', async () => {
-    const { pageStyles } = await import('../../src/content/page-translator')
     const css = pageStyles({ ...base, pageTranslationDisplayMode: 'learning' })
     expect(css).toContain('blur(5px)')
-    expect(css).toContain(':hover::after')
+    expect(css).toContain('[data-lens-page-inserted]:hover')
   })
 })
