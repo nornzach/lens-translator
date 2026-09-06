@@ -572,7 +572,7 @@ function shouldSkipElement(el: Element, allowSegmentContainer = false): boolean 
   ) {
     return true
   }
-  if (el.parentElement?.closest('[data-lens-page-translated]')) return true
+  if (el.parentElement?.closest('[data-lens-page-translated], [data-lens-page-pending]')) return true
   if (el.hasAttribute('hidden')) return true
   if (el.getAttribute('aria-hidden') === 'true') return true
 

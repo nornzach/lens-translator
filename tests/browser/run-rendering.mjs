@@ -77,9 +77,11 @@ try {
   await writeFile(join(output, 'results.json'), JSON.stringify(results, null, 2))
   for (const result of results) console.log(`${result.ok ? 'PASS' : 'FAIL'} ${result.name}${result.error ? `: ${result.error}` : ''}`)
   if (results.every(result => result.ok)) {
-    await send('Runtime.evaluate', { expression: 'window.__renderingPreview()', awaitPromise: true })
-    const screenshot = await send('Page.captureScreenshot', { captureBeyondViewport: true })
-    await writeFile(join(output, 'preview.png'), Buffer.from(screenshot.data, 'base64'))
+    for (const pending of [true, false]) {
+      await send('Runtime.evaluate', { expression: `window.__renderingPreview(${pending})`, awaitPromise: true })
+      const screenshot = await send('Page.captureScreenshot', { captureBeyondViewport: true })
+      await writeFile(join(output, pending ? 'pending-preview.png' : 'preview.png'), Buffer.from(screenshot.data, 'base64'))
+    }
   }
   console.log(`Browser evidence: ${output}`)
   if (results.some(result => !result.ok)) process.exitCode = 1

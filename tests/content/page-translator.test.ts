@@ -356,6 +356,8 @@ describe('pageStyles display modes', () => {
     expect(css).toContain('grid-column: 1 / -1 !important')
     expect(css).not.toContain('height: auto !important')
     expect(css).toContain('display: inline !important')
+    expect(css).toContain('@media (prefers-reduced-motion: reduce)')
+    expect(css).toContain('[data-lens-page-inserted][data-lens-page-pending]::before { animation: none !important; }')
   })
 
   it('bilingual mode adds no collapsing or blur rules', async () => {
@@ -396,6 +398,6 @@ describe('pageStyles display modes', () => {
   it('learning mode blurs translations until hover', async () => {
     const css = pageStyles({ ...base, pageTranslationDisplayMode: 'learning' })
     expect(css).toContain('blur(5px)')
-    expect(css).toContain('[data-lens-page-inserted]:hover')
+    expect(css).toContain('[data-lens-page-inserted]:not([data-lens-page-pending]):hover')
   })
 })

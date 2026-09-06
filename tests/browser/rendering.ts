@@ -9,6 +9,7 @@ const pause = (ms = 350) => new Promise(resolve => setTimeout(resolve, ms))
 const results: Array<{ name: string; ok: boolean; error?: string }> = []
 let requests: string[] = []
 let latency = 5
+let failRequests = false
 const translations: Record<string, string> = {
   Extensions: '扩展', 'Get Started': '开始使用', 'User Guide': '用户指南', Hardware: '硬件',
   Cookbook: '手册', 'SGLang Diffusion': 'SGLang 扩散', Post: '发布', 'Key Features': '主要特点',
@@ -20,6 +21,7 @@ Object.defineProperty(globalThis, 'chrome', { configurable: true, value: {
     if (message.type !== 'translate-batch') return null
     requests.push(...message.blocks.map(block => block.text))
     await pause(latency)
+    if (failRequests) return { type: 'translate-batch-result', ok: false, error: 'Test translation service unavailable' }
     return { type: 'translate-batch-result', ok: true, translations: message.blocks.map(block => ({
       id: block.id, translation: translations[block.text] ?? '这段中文译文用于检查页面排版。',
     })) }
@@ -35,12 +37,81 @@ async function run(name: string, html: string, test: () => Promise<void>) {
   document.body.style.cssText = 'margin:24px;font:16px/1.5 Arial;width:1100px'
   requests = []
   latency = 5
+  failRequests = false
   try { await test(); results.push({ name, ok: true }) }
   catch (error) { results.push({ name, ok: false, error: String(error) }) }
 }
 async function activate() { await translator.activate(settings, true); await pause() }
 
 async function main() {
+  await run('queued blocks show skeletons before requests and reuse them for translated text', Array.from({ length: 9 }, (_, i) => `<p id="queued${i}">Source paragraph number ${i % 8} awaiting translation.</p>`).join(''), async () => {
+    latency = 220
+    const work = translator.activate(settings, true)
+    await pause(20)
+    const placeholders = inserted()
+    check(placeholders.length === 9 && placeholders.every(node => node.hasAttribute('data-lens-page-pending')), 'queued paragraphs lack skeletons')
+    const inFlight = requests.length
+    check(inFlight === 6, 'request concurrency changed')
+    check(placeholders.every(node => node.textContent === '' && !node.hasAttribute('title')), 'skeleton exposes visible status text')
+    check(placeholders[0].getAttribute('aria-label') === '正在翻译…' && placeholders[7].getAttribute('aria-label') === '等待翻译…', 'queued and active requests lack accessible labels')
+    check(placeholders.every(node => node.getAttribute('aria-busy') === 'true'), 'pending status is inaccessible')
+    check(parseFloat(getComputedStyle(placeholders[0], '::before').width) > 0, 'skeleton bar has no visible width')
+    const height = placeholders[0].getBoundingClientRect().height
+    await work
+    await pause()
+    check(inserted().every((node, i) => node === placeholders[i]), 'results replaced skeleton DOM instead of updating in place')
+    check(inserted().every(node => !node.hasAttribute('aria-busy') && !node.hasAttribute('data-lens-page-pending')), 'completed text is still marked busy')
+    check(placeholders[0].getBoundingClientRect().height === height, 'one-line skeleton did not reserve a translation line')
+    check(requests.length === 8 && !requests.some(text => /等待翻译|正在翻译/.test(text)), 'skeleton triggered duplicate translation')
+  })
+
+  await run('pending hard-break paragraphs remain readable in translation-only mode and cancel cleanly', '<p id="waiting">First source paragraph stays visible.<br><br>Second source paragraph stays visible.</p>', async () => {
+    const original = document.getElementById('waiting')!.innerHTML
+    latency = 180
+    const work = translator.activate({ ...settings, pageTranslationDisplayMode: 'translation-only' }, true)
+    await pause(20)
+    check(inserted().length === 2, 'hard-break paragraph lacks its own skeleton')
+    check(inserted().every(node => getComputedStyle(node.parentElement!).visibility === 'visible'), 'pending translation hides the source too early')
+    translator.restyle({ ...settings, pageTranslationDisplayMode: 'learning' })
+    check(inserted().every(node => getComputedStyle(node).filter === 'none'), 'learning mode blurs pending state')
+    translator.deactivate()
+    await work
+    check(document.getElementById('waiting')!.innerHTML === original, 'cancelled skeleton or wrapper leaked into source')
+    check(!document.querySelector('[data-lens-page-pending]'), 'late response restored a cancelled skeleton')
+  })
+
+  await run('failed requests remove skeletons instead of leaving permanent activity', '<p>Source paragraph with an unavailable translation service.</p>', async () => {
+    latency = 100
+    failRequests = true
+    const work = translator.activate(settings, true)
+    await pause(20)
+    check(inserted().length === 1, 'request never showed a pending skeleton')
+    await work
+    check(inserted().length === 0 && !document.querySelector('[data-lens-page-pending]'), 'failed request left an endless skeleton')
+    check(document.getElementById('lens-translator-page-status')?.dataset.error === 'true', 'failure was not surfaced')
+  })
+
+  await run('on-device preparation and sequential requests expose their pending state', '<p>First paragraph for on-device translation.</p><p>Second paragraph for on-device translation.</p>', async () => {
+    let prepare: (ready: boolean) => void = () => {}
+    const onDevice = new PageTranslator({
+      availability: async () => 'available',
+      prepare: () => new Promise<boolean>(resolve => { prepare = resolve }),
+      translate: async () => { await pause(70); return '浏览器翻译结果。' },
+    } as unknown as BrowserTranslator)
+    try {
+      const work = onDevice.activate({ ...settings, pageTranslationEngine: 'browser' }, false)
+      await pause(20)
+      check(inserted().length === 2 && inserted().every(node => node.textContent === '' && node.hasAttribute('data-lens-page-pending')), 'language preparation lacks text-free skeletons')
+      prepare(true)
+      await pause(20)
+      check(inserted().every(node => node.textContent === ''), 'sequential request added visible status text')
+      check(inserted()[0].getAttribute('aria-label') === '正在翻译…' && inserted()[1].getAttribute('aria-label') === '等待翻译…', 'sequential request accessibility state is incorrect')
+      await work
+      check(inserted().every(node => node.textContent === '浏览器翻译结果。' && !node.hasAttribute('aria-busy')), 'on-device result did not replace skeleton')
+      check(requests.length === 0, 'on-device pending state invoked the external engine')
+    } finally { onDevice.deactivate() }
+  })
+
   await run('list links are translated exactly once with their prose', '<ul><li id="item"><a href="#">Extensions</a> - TypeScript modules for tools, commands, events, and custom UI.</li></ul>', async () => {
     await activate()
     check(requests.length === 1, `expected one source block, got ${JSON.stringify(requests)}`)
@@ -52,7 +123,14 @@ async function main() {
     ['Get Started', 'User Guide', 'Hardware', 'Cookbook', 'SGLang Diffusion'].map((text, i) =>
       `<a id="nav${i}" href="#" style="display:flex;align-items:center;height:36px;padding:0 6px;font:14px/20px Arial"><span>${text}</span></a>`).join('') + '</nav></header>'
   await run('navigation stays in its own controls, in source order, without resizing ancestors', nav, async () => {
-    await activate()
+    latency = 100
+    const work = translator.activate(settings, true)
+    await pause(20)
+    check(inserted().length === 5 && inserted().every(node => node.hasAttribute('data-lens-page-control') && node.textContent === ''), 'navigation lacks compact pending skeletons')
+    check(document.getElementById('header')!.getBoundingClientRect().height === 120, 'skeleton changed header height')
+    check(document.getElementById('nav')!.getBoundingClientRect().height === 44, 'skeleton changed navigation height')
+    await work
+    await pause()
     check(inserted().length === 5, `expected all five compact labels, got ${inserted().length}`)
     check(inserted().every((node, i) => node.closest('a')?.id === `nav${i}`), 'translation escaped or changed order')
     check(document.getElementById('header')!.getBoundingClientRect().height === 120, 'header height changed')
@@ -216,7 +294,9 @@ async function main() {
   })
 
   translator.deactivate()
-  Object.assign(window, { __renderingPreview: async () => {
+  Object.assign(window, { __renderingPreview: async (pending = false) => {
+    translator.deactivate()
+    latency = pending ? 10000 : 5
     document.body.style.cssText = 'margin:30px auto;width:1040px;font:16px/1.6 Arial;color:#18212f;background:#f8fafc'
     document.body.innerHTML = '<div data-lens-ignore style="margin-bottom:16px;font-weight:bold">本地渲染回归预览 · 模拟译文</div>' + nav +
       '<main style="width:850px;padding:24px;background:white;border:1px solid #dce3ec;border-radius:12px">' +
@@ -225,7 +305,8 @@ async function main() {
       '<p>A paragraph with <strong>important words</strong> and <code>literal_code</code> stays in its own reading block.</p>' +
       '<button style="width:220px;padding:10px;background:#0f1419;color:white;border-radius:24px;font:700 20px/28px Arial"><span>Post</span></button>' +
       '<table style="margin-top:24px;width:100%;border-top:1px solid #ccc"><tr><td><a href="#" style="display:block">Cloud model</a><span style="display:block">Updated model description</span></td><td>Other information</td></tr></table></main>'
-    await translator.activate(settings, true)
+    const work = translator.activate(settings, true)
+    if (!pending) await work
     await pause()
   } })
   document.body.textContent = results.map(result => `${result.ok ? 'PASS' : 'FAIL'} ${result.name}: ${result.error ?? ''}`).join('\n')

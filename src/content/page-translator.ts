@@ -36,6 +36,7 @@ const STATUS_ID = 'lens-translator-page-status'
 // prose uses a separate line, without changing ancestor layout.
 const INSERTED_ATTR = 'data-lens-page-inserted'
 const CONTROL_ATTR = 'data-lens-page-control'
+const PENDING_ATTR = 'data-lens-page-pending'
 
 // A translated host that keeps mutating (clocks, counters, live chat) would loop
 // forever between invalidate and re-translate. After this many re-invalidations
@@ -129,6 +130,43 @@ export function pageStyles(settings: PageSettings): string {
   white-space: nowrap !important;
 }
 
+[${INSERTED_ATTR}][${PENDING_ATTR}] {
+  cursor: progress !important;
+  user-select: none !important;
+  text-decoration: none !important;
+}
+
+[${INSERTED_ATTR}][${PENDING_ATTR}]::before {
+  content: '' !important;
+  display: inline-block !important;
+  width: min(45%, 18em) !important;
+  height: 0.55em !important;
+  margin-right: 0.65em !important;
+  vertical-align: 0.08em !important;
+  border-radius: 0.3em !important;
+  background: currentColor !important;
+  opacity: 0.18;
+  animation: lens-page-pending 1.6s ease-in-out infinite !important;
+}
+
+[${INSERTED_ATTR}][${PENDING_ATTR}][${CONTROL_ATTR}] {
+  display: inline-block !important;
+  width: 1.8em !important;
+}
+
+[${INSERTED_ATTR}][${PENDING_ATTR}][${CONTROL_ATTR}]::before {
+  width: 100% !important;
+  margin-right: 0 !important;
+}
+
+@keyframes lens-page-pending {
+  50% { opacity: 0.38; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [${INSERTED_ATTR}][${PENDING_ATTR}]::before { animation: none !important; }
+}
+
 
 ::highlight(${PAGE_ALIGNMENT_HIGHLIGHT_NAME}) {
   background: rgb(250 204 21 / 52%);
@@ -163,12 +201,12 @@ ${
     ? `
 /* Learning mode: translations stay blurred until hovered — read the original
    first, peek only when stuck. */
-[${INSERTED_ATTR}] {
+[${INSERTED_ATTR}]:not([${PENDING_ATTR}]) {
   filter: blur(5px) !important;
   opacity: 0.35 !important;
   transition: filter 0.15s ease, opacity 0.15s ease !important;
 }
-[${INSERTED_ATTR}]:hover {
+[${INSERTED_ATTR}]:not([${PENDING_ATTR}]):hover {
   filter: none !important;
   opacity: 1 !important;
 }
@@ -477,6 +515,7 @@ export class PageTranslator {
   private currentSettings: PageSettings | null = null
   private readonly dirtyRoots = new Set<ParentNode>()
   private readonly translatedHosts = new Set<Element>()
+  private readonly pendingHosts = new Set<Element>()
   private readonly sourceHosts = new Map<Element, string | null>()
   private attemptedTextByHost = new WeakMap<Element, string>()
   private sourceBlockByHost = new WeakMap<Element, Element>()
@@ -493,7 +532,7 @@ export class PageTranslator {
   private totalCount = 0
   private forceRefresh = false
   private readonly alignment = new PageAlignmentController()
-  // Maps a translated host to its inserted translation element.
+  // Maps a source host to its pending or completed translation element.
   private readonly insertedNodeByHost = new Map<Element, HTMLElement>()
   // Reverse lookup: when the page removes one of our nodes we only see the node.
   private readonly hostByInsertedNode = new Map<Element, Element>()
@@ -550,6 +589,8 @@ export class PageTranslator {
     for (const host of this.translatedHosts) {
       host.removeAttribute(TRANSLATED_ATTR)
     }
+    for (const host of this.pendingHosts) host.removeAttribute(PENDING_ATTR)
+    this.pendingHosts.clear()
     for (const node of this.insertedNodeByHost.values()) node.remove()
     this.insertedNodeByHost.clear()
     this.hostByInsertedNode.clear()
@@ -585,7 +626,7 @@ export class PageTranslator {
   /** First visible translated host per scroller, with its offset from the scroller top. */
   private captureScrollAnchors(): Map<Element | 'window', { el: Element; top: number }> {
     const anchors = new Map<Element | 'window', { el: Element; top: number }>()
-    for (const host of this.translatedHosts) {
+    for (const host of this.insertedNodeByHost.keys()) {
       if (!host.isConnected) continue
       const container = this.scrollContainerOf(host)
       const key: Element | 'window' = container ?? 'window'
@@ -762,6 +803,8 @@ export class PageTranslator {
 
       let translateError: string | null = null
       if (unresolved.length) {
+        this.scheduleScrollAnchorRestore()
+        for (const group of unresolved) this.showPendingGroup(group)
         try {
           if (settings.pageTranslationEngine === 'browser') {
             await this.translateWithBrowser(unresolved, settings, generation)
@@ -827,6 +870,7 @@ export class PageTranslator {
       }
     } finally {
       if (this.processingGeneration !== generation) return
+      for (const host of this.pendingHosts) this.clearPendingHost(host)
       this.processingGeneration = 0
       if (this.rescanRequested && this.isCurrent(generation)) {
         this.rescanRequested = false
@@ -845,6 +889,7 @@ export class PageTranslator {
     if (!ready) throw new Error('Chrome 内置翻译不支持当前语言对')
     for (const group of groups) {
       if (!this.isCurrent(generation)) return
+      this.setPendingStatus(group, '正在翻译…')
       const translation = await this.browserTranslator.translate(
         group.representative.text,
         settings.sourceLang,
@@ -852,6 +897,7 @@ export class PageTranslator {
       )
       if (!this.isCurrent(generation)) return
       if (translation) this.renderGroup(group, translation, settings)
+      for (const block of group.blocks) this.clearPendingHost(block.el)
       this.processedCount += group.blocks.length
       this.updateProgress()
     }
@@ -871,6 +917,7 @@ export class PageTranslator {
     this.scheduleScrollAnchorRestore()
     const runLine = async (group: TranslationGroup): Promise<void> => {
       if (!this.isCurrent(generation)) return
+      this.setPendingStatus(group, '正在翻译…')
       try {
         const response: unknown = await chrome.runtime.sendMessage({
           type: 'translate-batch',
@@ -895,6 +942,7 @@ export class PageTranslator {
       }
 
       if (!this.isCurrent(generation)) return
+      for (const block of group.blocks) this.clearPendingHost(block.el)
       this.processedCount += group.blocks.length
       this.updateProgress()
     }
@@ -907,6 +955,52 @@ export class PageTranslator {
     }
   }
 
+  private rememberSource(host: Element, text: string): void {
+    if (this.sourceHosts.has(host)) return
+    this.sourceHosts.set(host, host.getAttribute(PAGE_SOURCE_ATTR))
+    host.setAttribute(PAGE_SOURCE_ATTR, text)
+  }
+
+  private showPendingGroup(group: TranslationGroup): void {
+    // ponytail: reserve one line; estimate multiple lines only if real pages
+    // show distracting expansion when longer translations arrive.
+    for (const block of group.blocks) {
+      if (!block.el.isConnected || this.insertedNodeByHost.has(block.el)) continue
+      if (!block.segmentNodes && pageSourceText(block.el) !== block.text) continue
+      const sourceBlock = block.el
+      const host = this.materializeSegmentHost(block)
+      if (!host) continue
+      // Materialize hard-break paragraphs once, before any asynchronous work.
+      // The response then checks the same host's current source like ordinary prose.
+      block.el = host
+      delete block.segmentNodes
+      this.attemptedTextByHost.set(host, block.text)
+      const node = this.insertTranslationIntoHost(host, '', true)
+      if (!node) continue
+      this.rememberSource(host, block.text)
+      this.sourceBlockByHost.set(host, sourceBlock)
+      host.setAttribute(PENDING_ATTR, '')
+      this.pendingHosts.add(host)
+    }
+    this.setPendingStatus(group, '等待翻译…')
+  }
+
+  private setPendingStatus(group: TranslationGroup, text: string): void {
+    for (const block of group.blocks) {
+      const node = this.insertedNodeByHost.get(block.el)
+      if (!node?.hasAttribute(PENDING_ATTR)) continue
+      node.setAttribute('aria-label', text)
+    }
+  }
+
+  private clearPendingHost(host: Element): void {
+    if (!this.pendingHosts.has(host)) return
+    const attempted = this.attemptedTextByHost.get(host)
+    this.invalidateHost(host)
+    // Failure cleanup must not trigger a new request outside the bounded retry pass.
+    if (attempted !== undefined) this.attemptedTextByHost.set(host, attempted)
+  }
+
   private renderGroup(group: TranslationGroup, translation: string, settings: PageSettings): void {
     // Appended translations push everything below them down; anchor the
     // reading position before mutating so streamed renders do not drift the page.
@@ -917,6 +1011,7 @@ export class PageTranslator {
       // only belongs to the exact source that was sent, not its replacement.
       if (!block.el.isConnected || this.translatedHosts.has(block.el)) continue
       if (!block.segmentNodes && pageSourceText(block.el) !== block.text) {
+        this.clearPendingHost(block.el)
         this.attemptedTextByHost.delete(block.el)
         this.dirtyRoots.add(block.el)
         this.rescanRequested = true
@@ -924,10 +1019,9 @@ export class PageTranslator {
       }
       const host = this.materializeSegmentHost(block)
       if (!host || !host.isConnected || this.translatedHosts.has(host)) continue
-      if (!this.sourceHosts.has(host)) {
-        this.sourceHosts.set(host, host.getAttribute(PAGE_SOURCE_ATTR))
-        host.setAttribute(PAGE_SOURCE_ATTR, block.text)
-      }
+      this.rememberSource(host, block.text)
+      this.pendingHosts.delete(host)
+      host.removeAttribute(PENDING_ATTR)
       host.setAttribute(TRANSLATED_ATTR, '')
       const translationEl = this.insertTranslationIntoHost(host, translation)
       if (!translationEl) {
@@ -946,7 +1040,7 @@ export class PageTranslator {
       }
       this.translatedHosts.add(host)
       this.layoutSkippedHosts.delete(host)
-      this.sourceBlockByHost.set(host, block.el)
+      if (!this.sourceBlockByHost.has(host)) this.sourceBlockByHost.set(host, block.el)
       this.alignment.register(
         host,
         block.text,
@@ -984,14 +1078,30 @@ export class PageTranslator {
    * Returns null when no placement survives the host's layout — the caller
    * must then leave the original text untouched.
    */
-  private insertTranslationIntoHost(host: Element, translation: string): HTMLElement | null {
-    this.removeInsertedNodeForHost(host)
+  private insertTranslationIntoHost(host: Element, translation: string, pending = false): HTMLElement | null {
+    let node = this.insertedNodeByHost.get(host)
+    if (node && !node.isConnected) {
+      this.removeInsertedNodeForHost(host)
+      node = undefined
+    }
+    const existing = node
     const control = isUiLabelElement(host)
-    const node = document.createElement('span')
+    node ??= document.createElement('span')
     node.setAttribute(INSERTED_ATTR, '')
     node.setAttribute('data-lens-ignore', '')
     if (control) node.setAttribute(CONTROL_ATTR, '')
-    node.textContent = translation
+    if (pending) {
+      node.setAttribute(PENDING_ATTR, '')
+      node.setAttribute('aria-busy', 'true')
+      node.setAttribute('role', 'status')
+      // The existing page progress status owns live announcements.
+      node.setAttribute('aria-live', 'off')
+    } else if (existing) {
+      for (const attr of [PENDING_ATTR, 'aria-busy', 'aria-label', 'aria-live', 'role', 'title']) {
+        node.removeAttribute(attr)
+      }
+    }
+    node.textContent = pending ? '' : translation
     // Document styles never cross the shadow boundary — mirror the stylesheet
     // into each open shadow root that receives a translation.
     const root = host.getRootNode()
@@ -1002,11 +1112,13 @@ export class PageTranslator {
       root.prepend(style)
       this.shadowStyles.set(root, style)
     }
-    this.placeTranslationNode(host, node)
+    if (!existing) this.placeTranslationNode(host, node)
     if (evaluatePlacement(host, node, control) !== 'ok' || downstreamOverlap(node)) {
       // ponytail: fixed/clipped boxes keep their original geometry; use the
       // existing lens there instead of inventing cross-component placement.
       node.remove()
+      this.insertedNodeByHost.delete(host)
+      this.hostByInsertedNode.delete(node)
       return null
     }
     this.insertedNodeByHost.set(host, node)
@@ -1166,7 +1278,7 @@ export class PageTranslator {
         }
       }
 
-      const translatedHost = target.closest(`[${TRANSLATED_ATTR}]`)
+      const translatedHost = target.closest(`[${TRANSLATED_ATTR}], [${PENDING_ATTR}]`)
       if (translatedHost) {
         const source = translatedHost.getAttribute(PAGE_SOURCE_ATTR) ?? ''
         if (pageSourceText(translatedHost) === source) continue
@@ -1206,7 +1318,7 @@ export class PageTranslator {
         ? (record.target as Element)
         : record.target.parentElement
     if (!target) return false
-    if (target.closest(`[${TRANSLATED_ATTR}]`)) return false
+    if (target.closest(`[${TRANSLATED_ATTR}], [${PENDING_ATTR}]`)) return false
     return findVirtualScrollAncestor(target) !== null
   }
 
@@ -1238,17 +1350,20 @@ export class PageTranslator {
     this.alignment.unregister(host)
     this.removeInsertedNodeForHost(host)
     host.removeAttribute(TRANSLATED_ATTR)
+    host.removeAttribute(PENDING_ATTR)
     this.translatedHosts.delete(host)
+    this.pendingHosts.delete(host)
     const previous = this.sourceHosts.get(host)
     if (previous === null) host.removeAttribute(PAGE_SOURCE_ATTR)
     else if (previous !== undefined) host.setAttribute(PAGE_SOURCE_ATTR, previous)
     this.sourceHosts.delete(host)
     this.attemptedTextByHost.delete(this.sourceBlockByHost.get(host) ?? host)
+    this.attemptedTextByHost.delete(host)
     this.sourceBlockByHost.delete(host)
   }
 
   private cleanupDisconnectedHosts(): void {
-    for (const host of this.translatedHosts) {
+    for (const host of this.insertedNodeByHost.keys()) {
       if (host.isConnected) continue
       this.invalidateHost(host)
     }
